@@ -1,96 +1,109 @@
 # dsh-jev-interceptor
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node >= 20.3](https://img.shields.io/badge/node-%3E%3D20.3-green.svg)]()
+[![dsh plugin](https://img.shields.io/badge/dsh-plugin-8A2BE2.svg)](https://github.com/topics/dsh-plugin)
+[![Jev](https://img.shields.io/badge/powered%20by-Jev%20%7C%20System%20One-ff6b35.svg)](https://typesafe.ai)
+
+> ⚡ **Millisecond judgement for every tool call — for about two millionths of a dollar.**
+>
+> Your agent's most expensive habit is asking a poetry-writing LLM yes/no questions.
+> This plugin wires [Jev](https://typesafe.ai) — the non-generative "System One" model that broke everyone's feed — straight into the two decision points of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) where an LLM is overkill and rules are blind.
+
 English | [中文](README.zh.md)
 
-[System-1 decisions](docs/jev-usage-points.md) for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh): this plugin classifies every pending tool call with [Jev](https://typesafe.ai) — TypeSafe AI's non-generative "System One" model — in one millisecond-scale request, and uses the calibrated answers to
+**What it does, in one breath:** before a tool call runs, Jev classifies its risk, irreversibility, task-fit, and injection-suspicion in one ~$0.00002 request — confident high-risk calls get denied, medium ones escalate to a human, and clearly-granted reversible ones stop wasting your clicks on approval dialogs. Every doubt, every timeout, every missing key degrades to stock dsh behavior. Nothing to configure away, nothing that can widen a permission.
 
-1. **escalate risky calls to a human before they run** (`tools/pre-execute`), and
-2. **auto-approve clearly-granted, reversible ones** (`approval/request`) so humans stop clicking through routine approvals.
+## Why this exists
 
-Everything degrades fail-closed: with no key, during provider cooldown, on timeout, or on any internal error, every hook delegates through `next()` and dsh behaves exactly as if this plugin were not installed. The plugin never widens a permission the base composition would not grant, and it is inert until you enable it.
+dsh ships **zero per-call risk classification** — the pre-execute waterfall's default is a bare `allow`. Its only built-in precedent, `experimental/auto-review`, does the classification with a *generative* LLM: one full model request per tool call, temperature 0, hand-rolled JSON text protocol, self-described as slow, expensive, and experimental. That's a System-2 scribe doing a System-1 reflex's job:
 
-## Why
-
-dsh ships no per-call risk classifier — the pre-execute waterfall's default is plain `allow`. The only built-in precedent, `experimental/auto-review`, runs a **generative** LLM at temperature 0 and parses a hand-written JSON protocol to do a three-way classification: slow, expensive, and self-described as experimental. This plugin puts the same decision where it belongs — a typed decision primitive:
-
-| | auto-review (generative LLM) | this plugin (Jev) |
+| | auto-review (generative LLM) | dsh-jev-interceptor (Jev) |
 |---|---|---|
-| Decision shape | JSON text emitted token-by-token, then parsed | typed `choice`/`noul` answers, structurally zero type errors |
-| Cost | one full LLM request per call | ~$0.00002 per call at ~1-4k input tokens ($0.042/MTok) |
-| Uncertainty | implicit in prose | per-question probability distributions + confidence |
-| Failure | parse fallback → deny | low confidence → delegate (`next()`), never a guess |
+| Decision shape | emits JSON token-by-token, then parses it and prays | typed `choice`/`noul` answers — type errors are structurally impossible |
+| Cost per call | one **full LLM request** | **~$0.00002** (measured: 501 input tokens) |
+| Latency | seconds | ~100ms provider-side (TypeSafe-reported p50); ~1s end-to-end from outside US-West |
+| Uncertainty | buried in prose | per-question probability distributions + calibrated confidence |
+| Failure path | parse fallback → deny | low confidence → `next()` — **it never guesses** |
 
-The full inventory of where Jev fits in dsh — this plugin's two hooks plus eleven verified roadmap hooks (model routing, subagent defaults, worker-report verification, image-offload pre-planning, session-snapshot retention, and more) — lives in [docs/jev-usage-points.md](docs/jev-usage-points.md).
+Jev's maker TypeSafe reports up to **200× faster / 400× cheaper** than LLMs on classification workflows — and this plugin is that number, landed in a real agent harness, with receipts in `/jev-stats`.
 
-## Install
+We believe this is the **first System-1 decision plugin in the dsh ecosystem**. The full map of where decision models fit in dsh — this plugin's two hooks plus eleven more verified hooks (semantic model routing, context-retention scoring, image-offload pre-planning, worker-report verification...) — is in [docs/jev-usage-points.md](docs/jev-usage-points.md).
 
-Requires Node ≥ 20.3 (AbortSignal.any) and a dsh profile.
+## The 60-second tour
 
 ```sh
 dsh plugin --profile <name> add dsh-jev-interceptor
 ```
 
-or from a git checkout (users must allowlist the build script; see the dsh plugin docs):
-
-```sh
-dsh plugin --profile <name> add github:<you>/dsh-jev-interceptor
-```
-
-## Configure
-
-The plugin is disabled by default and starts in **shadow mode** when enabled — it records every decision it *would* take (telemetry + `/jev-stats`) without enforcing anything. Promote to `enforce` once the numbers look right.
-
-In your profile's `cordis.patch.yml` (or via the settings surface):
-
 ```yaml
+# in your profile's cordis.patch.yml
 - id: jev-interceptor
   name: dsh-jev-interceptor
   config:
     enabled: true
-    mode: shadow            # or 'enforce' to act on decisions
-    provider: typesafe      # 'typesafe' | 'openrouter' | 'custom'
-    # apiKeyEnv: TYPESAFE_API_KEY   # credential-ref; or OPENROUTER_API_KEY for openrouter
-    # endpoint: ...                 # required for provider: custom
-    # model: ...                    # defaults per provider; pin a version for stable thresholds
+    mode: shadow            # watch mode first: records every decision, enforces nothing
+    provider: typesafe      # or 'openrouter' (works today, no waitlist) | 'custom'
 ```
 
-OpenRouter example (decisions models live on a dedicated endpoint there):
+Use your agent normally. In shadow mode every decision lands in telemetry with its full probability distribution; `/jev-stats` summarizes:
+
+```
+[guard] calls: 41  degraded: 0  cached: 9
+  actions: delegate=33 ask=6 deny=2
+  input tokens: 18234  est. cost: $0.000766
+  latency: p50 247ms  p95 512ms  max 611ms
+```
+
+Happy with the numbers? Flip `mode: enforce`. That's the whole rollout plan — **shadow first, then trust, never guess**.
+
+## Safety model (the part you should actually read)
+
+- **Never `allow`.** "No objection" is expressed as `next()`, so downstream listeners (external hooks, auto-review) keep their veto.
+- **Fail-closed everywhere.** No key / provider cooldown / timeout / parse mismatch / internal error → delegate to stock behavior. The approval service's `never` policy is enforced upstream of every listener, so this plugin structurally cannot relax it.
+- **Evidence-gated auto-approval.** `allowed-once` requires captured argument evidence: only a call the guard escalated (fresh pending entry, matching session and tool) can be auto-approved. Hook asks and sandbox escalations carry no arguments and always go to the human.
+- **Injection-aware.** Tool arguments enter the Jev `state` data field only; `instructions` are fixed strings; a suspected-injection answer *escalates* rather than suppresses. (Jev's maker acknowledges adversarial inputs can sway classifiers — so denial here is an accelerator, never the last line of defense.)
+- **Bounded input.** Head+tail argument previews and trailing-message digests — Jev's own guidance is to filter in code and send only what a question needs.
+- **Resilient by construction.** Wall-clock timeout per attempt, single retry on 429/529, cooldown after consecutive failures (timeouts count), concurrency cap, LRU decision cache, queue-bound semaphore. A dead provider costs you zero behavior, not your harness.
+- **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`); `/jev-stats` aggregates it per hook.
+
+All of this is enforced by **52 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
+
+## Configure
+
+Everything is a config field — timeouts, cooldown, concurrency, cache, per-hook thresholds, tool lists — see the `Config` schema in `src/config.ts`. Notable defaults:
+
+- read-only tools (`read`, `read_image`, `grep`, `glob`, `todo_write`) short-circuit with **zero cost**;
+- the Auto permission preset is left entirely to `auto-review` (no double review, no double billing);
+- the pre-approval allowlist starts **empty** — until you name tools in `preapproveToolAllowlist`, nothing is ever auto-approved.
+
+OpenRouter works today with no waitlist (decisions models live on a dedicated endpoint there):
 
 ```yaml
     provider: openrouter
     apiKeyEnv: OPENROUTER_API_KEY
 ```
 
-Everything else is a config field (timeouts, cooldown, concurrency, cache, per-hook thresholds, tool lists) — see the `Config` schema in `src/config.ts`. Notable defaults:
-
-- read-only tools (`read`, `read_image`, `grep`, `glob`, `todo_write`) short-circuit with zero cost;
-- the Auto permission preset is left entirely to `auto-review`;
-- the pre-approval allowlist starts **empty** — until you name tools in `preapproveToolAllowlist`, nothing is ever auto-approved.
-
-## Safety model
-
-- **Never `allow`.** "No objection" is expressed as `next()`, so downstream listeners (external hooks, auto-review) keep their veto.
-- **Fail-closed everywhere.** No key / cooldown / timeout / parse mismatch / internal error → delegate. The approval service's `never` policy is enforced upstream of every listener, so this plugin structurally cannot relax it.
-- **Evidence-gated auto-approval.** `allowed-once` requires captured argument evidence: only a call the guard escalated (fresh pending entry, matching session and tool) can be auto-approved. Hook asks and sandbox escalations carry no arguments and always go to the human.
-- **Injection-aware.** Tool arguments enter the Jev `state` data field only; `instructions` are fixed strings; a suspected-injection answer escalates rather than suppresses.
-- **Bounded input.** Head+tail argument previews and trailing-message digests — the provider's own guidance is to filter in code and send only what a question needs.
-- **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (default `~/.dsh/plugins/dsh-jev-interceptor/`, honoring `$DSH_HOME`) (action, answers, confidence, latency, tokens, cost, degrade reasons); `/jev-stats` summarizes it per hook.
-- **Resilient.** Wall-clock timeout per attempt, one retry on 429/529, cooldown after consecutive failures (timeouts count), in-flight cap (default 4; the provider rate-limits near 8), LRU decision cache.
+The client speaks the plain `state + questions` wire shape shared by TypeSafe direct, OpenRouter, and the Apache-2.0 local alternative [Laya](https://huggingface.co/convaiinnovations/laya) — providers stay swappable, and a closed provider never becomes a lock-in.
 
 ## Development
 
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
-npm run typecheck
+npm run typecheck                # src + tests, against real @deepseek-ai types
 npm test                         # vitest, 52 tests, no network
 npm run build                    # tsc -> lib/
+node scripts/smoke.mjs           # one real decision against a live provider
 ```
 
-`scripts/smoke.mjs` runs the built client once against a real provider (set `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY`).
+## Roadmap: the other eleven hooks
 
-## Status and roadmap
+v0.1 holds the approval loop. The verified next frontiers — where selection, not just safety, meets System-1 ([full catalog](docs/jev-usage-points.md)):
 
-v0.1 implements the approval loop (guard + pre-approval + telemetry). The verified next hooks — content-aware model routing, subagent model defaults, Ralph report verification, goal-round progress, image-offload pre-planning, session-snapshot retention — are catalogued in [docs/jev-usage-points.md](docs/jev-usage-points.md). Jev is a closed, early-access service: the client speaks the plain `state + questions` shape shared by TypeSafe direct, OpenRouter, and the Apache-2.0 local alternative [Laya](https://huggingface.co/convaiinnovations/laya), so providers stay swappable.
+- **Semantic context retention** — score every message when an `@session` snapshot is injected, so the *error traceback* survives the byte budget instead of the *oldest small talk*
+- **Image-offload pre-planning** — dsh's own README admits "nothing plans an offload before dispatch"; Jev plans it
+- **Content-aware model routing** — routine steps on the cheap route, deep work on the strong one
+- **Worker-report verification** — when a subagent says "done", something checks
 
 ## License
 

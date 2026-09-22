@@ -1,7 +1,7 @@
 {
   "name": "dsh-jev-interceptor",
   "version": "0.1.0",
-  "description": "System-1 decisions for DeepSeek Harness (dsh): millisecond tool-call risk classification and low-risk auto-approval powered by Jev (TypeSafe AI System One), with fail-closed degradation to stock behavior.",
+  "description": "Millisecond System-1 judgement for every tool call in DeepSeek Harness: Jev-powered risk classification and evidence-gated auto-approval, fail-closed by construction.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -72,5 +72,14 @@
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
-  }
+  },
+  "author": "AskTheWay",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AskTheWay/dsh-jev-interceptor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AskTheWay/dsh-jev-interceptor/issues"
+  },
+  "homepage": "https://github.com/AskTheWay/dsh-jev-interceptor#readme"
 }
