@@ -1,0 +1,6 @@
+# The dsh-jev-interceptor bundle layer: one opt-in plugin row.
+# Users enable it through cordis.yml config (`enabled: true`) or the
+# dsh settings surface; the plugin's schema defaults keep it inert.
+- insert:
+    - id: jev-interceptor
+      name: dsh-jev-interceptor
