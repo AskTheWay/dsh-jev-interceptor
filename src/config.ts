@@ -6,8 +6,7 @@
  */
 
 import z from '@deepseek-ai/schemastery'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /**
  * Complete plugin configuration, validated by the same-named schema.
@@ -44,6 +43,8 @@ export interface Config {
   telemetryDir?: string
   /** Trailing messages digested into the guard state (default 6). */
   recentMessages?: number
+  /** Trailing messages digested into the pre-approval state (default 3). */
+  preapproveRecentMessages?: number
   /** Per-message text bound in the state, characters (default 300). */
   recentMessageChars?: number
   /** Head characters kept from tool arguments in the state (default 2048). */
@@ -76,6 +77,8 @@ export interface Config {
   preapproveAutoApproveMin?: number
   /** Irreversibility at/above which auto-approval is blocked (default 0.15). */
   preapproveIrreversibleMax?: number
+  /** Injection suspicion at/above which auto-approval is blocked (default 0.5). */
+  preapproveInjectionSuspectMax?: number
 }
 
 /** Read-only dsh tool names (verified against the dsh tool registry) that never need classification. */
@@ -98,6 +101,7 @@ export const DEFAULTS = {
   maxConcurrency: 4,
   cacheSize: 512,
   recentMessages: 6,
+  preapproveRecentMessages: 3,
   recentMessageChars: 300,
   argsHeadChars: 2048,
   argsTailChars: 512,
@@ -113,6 +117,7 @@ export const DEFAULTS = {
   preapproveToolAllowlist: [] as string[],
   preapproveAutoApproveMin: 0.85,
   preapproveIrreversibleMax: 0.15,
+  preapproveInjectionSuspectMax: 0.5,
 } as const
 
 export const Config: z<Config> = z.object({
@@ -129,6 +134,7 @@ export const Config: z<Config> = z.object({
   cacheSize: z.number().step(1).min(0).default(DEFAULTS.cacheSize),
   telemetryDir: z.string(),
   recentMessages: z.number().step(1).min(0).max(24).default(DEFAULTS.recentMessages),
+  preapproveRecentMessages: z.number().step(1).min(0).max(24).default(DEFAULTS.preapproveRecentMessages),
   recentMessageChars: z.number().step(1).min(40).default(DEFAULTS.recentMessageChars),
   argsHeadChars: z.number().step(1).min(64).default(DEFAULTS.argsHeadChars),
   argsTailChars: z.number().step(1).min(0).default(DEFAULTS.argsTailChars),
@@ -146,6 +152,7 @@ export const Config: z<Config> = z.object({
   preapproveToolAllowlist: z.array(z.string()).default(DEFAULTS.preapproveToolAllowlist),
   preapproveAutoApproveMin: z.number().min(0).max(1).default(DEFAULTS.preapproveAutoApproveMin),
   preapproveIrreversibleMax: z.number().min(0).max(1).default(DEFAULTS.preapproveIrreversibleMax),
+  preapproveInjectionSuspectMax: z.number().min(0).max(1).default(DEFAULTS.preapproveInjectionSuspectMax),
 })
 
 /** Fully-defaulted settings, the one resolved shape the rest of the plugin consumes. */
@@ -158,6 +165,7 @@ export interface ResolvedSettings {
   readonly cacheSize: number
   readonly telemetryDir: string
   readonly recentMessages: number
+  readonly preapproveRecentMessages: number
   readonly recentMessageChars: number
   readonly argsHeadChars: number
   readonly argsTailChars: number
@@ -173,6 +181,7 @@ export interface ResolvedSettings {
   readonly preapproveToolAllowlist: ReadonlySet<string>
   readonly preapproveAutoApproveMin: number
   readonly preapproveIrreversibleMax: number
+  readonly preapproveInjectionSuspectMax: number
   readonly apiKeyEnv: string
 }
 
@@ -189,10 +198,13 @@ export function resolveSettings(config: Config): ResolvedSettings {
     failureThreshold: config.failureThreshold ?? DEFAULTS.failureThreshold,
     maxConcurrency: config.maxConcurrency ?? DEFAULTS.maxConcurrency,
     cacheSize: config.cacheSize ?? DEFAULTS.cacheSize,
+    // Follows the dsh home ($DSH_HOME, default ~/.dsh) so telemetry lives
+    // with the rest of the harness data under a relocated home.
     telemetryDir: config.telemetryDir && config.telemetryDir.length > 0
       ? config.telemetryDir
-      : joinHome('.dsh-jev-interceptor'),
+      : dshHomePath('plugins', 'dsh-jev-interceptor'),
     recentMessages: config.recentMessages ?? DEFAULTS.recentMessages,
+    preapproveRecentMessages: config.preapproveRecentMessages ?? DEFAULTS.preapproveRecentMessages,
     recentMessageChars: config.recentMessageChars ?? DEFAULTS.recentMessageChars,
     argsHeadChars: config.argsHeadChars ?? DEFAULTS.argsHeadChars,
     argsTailChars: config.argsTailChars ?? DEFAULTS.argsTailChars,
@@ -208,13 +220,9 @@ export function resolveSettings(config: Config): ResolvedSettings {
     preapproveToolAllowlist: new Set(config.preapproveToolAllowlist ?? DEFAULTS.preapproveToolAllowlist),
     preapproveAutoApproveMin: config.preapproveAutoApproveMin ?? DEFAULTS.preapproveAutoApproveMin,
     preapproveIrreversibleMax: config.preapproveIrreversibleMax ?? DEFAULTS.preapproveIrreversibleMax,
+    preapproveInjectionSuspectMax: config.preapproveInjectionSuspectMax ?? DEFAULTS.preapproveInjectionSuspectMax,
     apiKeyEnv: config.apiKeyEnv ?? DEFAULTS.apiKeyEnv,
   }
-}
-
-/** Default telemetry directory under the user's home. */
-function joinHome(relative: string): string {
-  return join(homedir(), relative)
 }
 
 /** TypeSafe's public decisions endpoint. */

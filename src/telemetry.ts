@@ -9,7 +9,6 @@
 
 import { appendFile, mkdir, readFile, stat, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { LruCache } from './resilience.js'
 
 /** Where a decision came from. */
 export type DecisionTag = 'guard' | 'preapprove'
@@ -70,20 +69,18 @@ const JEV_USD_PER_MTOK = 0.042
 const ROTATE_BYTES = 20 * 1024 * 1024
 
 /**
- * File-backed telemetry writer plus a small in-memory aggregator.
+ * File-backed telemetry writer; `/jev-stats` aggregates by re-reading the log.
  */
 export class Telemetry {
   private readonly file: string
   private dirReady: Promise<void> | undefined
   private rotated = false
-  private readonly aggregate: LruCache<string, TagStats>
 
   /**
    * @param dir - directory for `telemetry.jsonl` (created on first write).
    */
   constructor(dir: string) {
     this.file = join(dir, 'telemetry.jsonl')
-    this.aggregate = new LruCache(16)
   }
 
   /**
@@ -97,7 +94,6 @@ export class Telemetry {
       .catch(() => {
         // Telemetry is best-effort; nothing downstream depends on it.
       })
-    this.fold(entry)
   }
 
   /**
@@ -148,12 +144,6 @@ export class Telemetry {
     }
   }
 
-  /** Fold one entry into the in-memory aggregate (also used by stats()). */
-  private fold(entry: TelemetryEntry): void {
-    const stats = this.aggregate.get(entry.tag) ?? emptyStats()
-    foldInto(stats, entry)
-    this.aggregate.set(entry.tag, stats)
-  }
 
   /** One-time directory creation and oversized-log rotation. */
   private ready(): Promise<void> {

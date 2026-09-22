@@ -24,7 +24,7 @@ The full inventory of where Jev fits in dsh — this plugin's two hooks plus ele
 
 ## Install
 
-Requires Node ≥ 20 and a dsh profile.
+Requires Node ≥ 20.3 (AbortSignal.any) and a dsh profile.
 
 ```sh
 dsh plugin --profile <name> add dsh-jev-interceptor
@@ -71,9 +71,10 @@ Everything else is a config field (timeouts, cooldown, concurrency, cache, per-h
 
 - **Never `allow`.** "No objection" is expressed as `next()`, so downstream listeners (external hooks, auto-review) keep their veto.
 - **Fail-closed everywhere.** No key / cooldown / timeout / parse mismatch / internal error → delegate. The approval service's `never` policy is enforced upstream of every listener, so this plugin structurally cannot relax it.
+- **Evidence-gated auto-approval.** `allowed-once` requires captured argument evidence: only a call the guard escalated (fresh pending entry, matching session and tool) can be auto-approved. Hook asks and sandbox escalations carry no arguments and always go to the human.
 - **Injection-aware.** Tool arguments enter the Jev `state` data field only; `instructions` are fixed strings; a suspected-injection answer escalates rather than suppresses.
 - **Bounded input.** Head+tail argument previews and trailing-message digests — the provider's own guidance is to filter in code and send only what a question needs.
-- **Observable.** Every decision lands in `~/.dsh-jev-interceptor/telemetry.jsonl` (action, answers, confidence, latency, tokens, cost, degrade reasons); `/jev-stats` summarizes it per hook.
+- **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (default `~/.dsh/plugins/dsh-jev-interceptor/`, honoring `$DSH_HOME`) (action, answers, confidence, latency, tokens, cost, degrade reasons); `/jev-stats` summarizes it per hook.
 - **Resilient.** Wall-clock timeout per attempt, one retry on 429/529, cooldown after consecutive failures (timeouts count), in-flight cap (default 4; the provider rate-limits near 8), LRU decision cache.
 
 ## Development
@@ -81,7 +82,7 @@ Everything else is a config field (timeouts, cooldown, concurrency, cache, per-h
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
 npm run typecheck
-npm test                         # vitest, 40 tests, no network
+npm test                         # vitest, 52 tests, no network
 npm run build                    # tsc -> lib/
 ```
 

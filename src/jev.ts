@@ -141,11 +141,26 @@ export class JevClient {
       .update(JSON.stringify([this.model, call.state, call.questions]))
       .digest('hex')
     const hit = this.cache.get(cacheKey)
-    if (hit !== undefined) return { ...hit, cached: true }
+    if (hit !== undefined) {
+      // A hit reuses the ANSWERS only: usage and latency belong to the
+      // original billable call, so recording them again would multiply the
+      // reported token count and cost by every reuse.
+      return {
+        answers: hit.answers,
+        model: hit.model,
+        latencyMs: 0,
+        inputTokens: undefined,
+        costUsd: undefined,
+        cached: true,
+      }
+    }
 
     if (call.signal?.aborted) return degrade('aborted')
-    const acquired = await this.semaphore.acquire(call.signal ?? new AbortController().signal)
-    if (!acquired) return degrade('aborted')
+    const acquired = await this.semaphore.acquire(
+      call.signal ?? new AbortController().signal,
+      this.timeoutMs - (this.now() - started),
+    )
+    if (acquired !== 'acquired') return degrade(acquired === 'aborted' ? 'aborted' : 'timeout')
     try {
       const outcome = await this.request(call, key, started)
       if (typeof outcome === 'string') {
@@ -222,8 +237,10 @@ export class JevClient {
           costUsd: reportedCost ?? estimateCostUsd(inputTokens),
         }
       } catch {
-        // parseAnswers throws on malformed bodies; a parse failure is a protocol failure.
+        // parseAnswers throws on malformed bodies; a parse failure is a
+        // protocol failure unless the timer or caller ended the call first.
         if (call.signal?.aborted) return 'caller-aborted'
+        if (timer.aborted) return 'timeout'
         return 'invalid-response'
       }
     }

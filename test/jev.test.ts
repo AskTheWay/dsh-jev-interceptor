@@ -54,6 +54,10 @@ describe('JevClient', () => {
     const second = await client.classify(call)
     expect(fetches).toBe(1)
     expect(second?.cached).toBe(true)
+    // A hit reuses answers only; usage and latency belong to the billed call.
+    expect(second?.inputTokens).toBeUndefined()
+    expect(second?.costUsd).toBeUndefined()
+    expect(second?.latencyMs).toBe(0)
   })
 
   it('degrades to null without a key and without counting failures', async () => {

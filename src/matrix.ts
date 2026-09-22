@@ -82,28 +82,33 @@ export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds):
       reason: `jev-guard: medium-risk tool call (p=${p(risk.probabilities['medium'] ?? risk.confidence)})`,
     }
   }
-  // risk.choice === 'low'
-  if (risk.confidence >= thresholds.confidenceMin && irreversible.noul < thresholds.irreversibleCeiling) {
-    return { kind: 'delegate' }
+  // risk.choice === 'low': low confidence never acts either — it delegates to
+  // stock behavior rather than escalating on a guess. Only NEW adverse
+  // evidence (irreversibility) escalates a low-risk classification.
+  if (irreversible.noul >= thresholds.irreversibleCeiling) {
+    return {
+      kind: 'ask',
+      reason: `jev-guard: low risk but possibly irreversible (p=${p(irreversible.noul)})`,
+    }
   }
-  return {
-    kind: 'ask',
-    reason: `jev-guard: low risk but ${irreversible.noul >= thresholds.irreversibleCeiling ? 'possibly irreversible' : 'low-confidence'} (p=${p(risk.confidence)})`,
-  }
+  return { kind: 'delegate' }
 }
 
 /** The Jev answers the pre-approval questions produce. */
 export interface PreapproveAnswers {
   readonly withinGrantedScope: NoulAnswer
   readonly reversible: NoulAnswer
+  readonly injectionSuspect: NoulAnswer
 }
 
 /** Tunable thresholds consumed by {@link decidePreapprove}. */
 export interface PreapproveThresholds {
-  /** Minimum confidence on BOTH questions to auto-approve. */
+  /** Minimum confidence on scope/reversibility to auto-approve. */
   readonly autoApproveMin: number
   /** Irreversibility at or above this level blocks auto-approval. */
   readonly irreversibleMax: number
+  /** Injection suspicion at or above this level blocks auto-approval. */
+  readonly injectionSuspectMax: number
 }
 
 /** One resolved pre-approval verdict. */
@@ -121,7 +126,10 @@ export function decidePreapprove(
   answers: PreapproveAnswers,
   thresholds: PreapproveThresholds,
 ): PreapproveVerdict {
-  const { withinGrantedScope, reversible } = answers
+  const { withinGrantedScope, reversible, injectionSuspect } = answers
+  if (injectionSuspect.noul >= thresholds.injectionSuspectMax) {
+    return { kind: 'human', reason: `injection suspicion ${p(injectionSuspect.noul)} at or above ${thresholds.injectionSuspectMax}` }
+  }
   if (withinGrantedScope.noul < thresholds.autoApproveMin) {
     return { kind: 'human', reason: `scope confidence ${p(withinGrantedScope.noul)} below ${thresholds.autoApproveMin}` }
   }

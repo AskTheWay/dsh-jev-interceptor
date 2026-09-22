@@ -24,7 +24,7 @@ Jev 在 dsh 中的完整落点清单——本插件的两个挂点 + 十一个�
 
 ## 安装
 
-需要 Node ≥ 20 与一个 dsh profile。
+需要 Node ≥ 20.3（AbortSignal.any）与一个 dsh profile。
 
 ```sh
 dsh plugin --profile <name> add dsh-jev-interceptor
@@ -71,9 +71,10 @@ OpenRouter 示例（decisions 模型在那里走专用端点）：
 
 - **永不返回 `allow`。** "无异议"用 `next()` 表达，链上后续 listener（外部 hook、auto-review）的否决权完好无损。
 - **处处 fail-closed。** 无 key / 冷却 / 超时 / 解析不匹配 / 内部错误 → 委托。审批服务的 `never` 策略在任何 listener 之前执行，本插件在结构上就无法放宽它。
+- **证据门控的自动批准。** `allowed-once` 必须有参数证据：只有 guard 升级过的调用（新鲜条目、会话与工具都匹配）才可能被自动批；hook 请求与沙箱提级不携带参数，一律转人工。
 - **注入感知。** 工具参数只进 Jev `state` 数据字段；`instructions` 是固定文案；疑似注入的答案触发升级而非压制。
 - **输入限界。** 参数头尾预览 + 尾部消息摘要——provider 官方指引就是"代码先过滤，只发问题需要的字段"。
-- **可观测。** 每个决策落入 `~/.dsh-jev-interceptor/telemetry.jsonl`（动作、答案、置信度、延迟、token、成本、降级原因）；`/jev-stats` 按挂点汇总。
+- **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（默认 `~/.dsh/plugins/dsh-jev-interceptor/`，遵循 `$DSH_HOME`）（动作、答案、置信度、延迟、token、成本、降级原因）；`/jev-stats` 按挂点汇总。
 - **有韧性。** 每次尝试墙钟超时、429/529 单次重试、连续失败进冷却（超时也计数）、在途上限（默认 4；provider 约 8 并发即触限）、LRU 决策缓存。
 
 ## 开发

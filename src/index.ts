@@ -78,8 +78,11 @@ export function apply(ctx: Context, config: Config): void {
   const resolveKey = async (): Promise<string | undefined> => {
     const credentials = ctx.get('credentials')
     if (credentials !== undefined) {
+      // The seam owns the whole credential plane when present: a miss does not
+      // fall through to ambient values (mirrors the llm-deepseek precedent).
       const hit = await credentials.resolve(ref)
       if (hit !== undefined && hit.value.length > 0) return hit.value
+      return undefined
     }
     // Without the credentials seam the launching environment is the whole credential plane.
     const ambient = launchEnvironmentOf(ctx).get(ref)
@@ -101,7 +104,6 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   // Optional seams resolved defensively: the plugin loads in every profile.
-  const permissionPresets = ctx.get('permissionPresets')
 
   if (settings.guardEnabled) {
     ctx.on('tools/pre-execute', createGuardListener({
@@ -122,7 +124,8 @@ export function apply(ctx: Context, config: Config): void {
       jev,
       telemetry,
       pendingAsks,
-      permissionPresets,
+      // Resolved per event: a capture here could miss a service that activates later.
+      permissionPresets: () => ctx.get('permissionPresets'),
     }))
   }
 
@@ -133,8 +136,9 @@ export function apply(ctx: Context, config: Config): void {
       thresholds: {
         autoApproveMin: settings.preapproveAutoApproveMin,
         irreversibleMax: settings.preapproveIrreversibleMax,
+        injectionSuspectMax: settings.preapproveInjectionSuspectMax,
       },
-      recentMessages: 3,
+      recentMessages: settings.preapproveRecentMessages,
       recentMessageChars: settings.recentMessageChars,
       jev,
       telemetry,

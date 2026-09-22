@@ -67,7 +67,7 @@ async function makeDeps(overrides: Partial<GuardDeps> & { classify?: () => Promi
     jev: stub,
     telemetry: new Telemetry(await mkdtemp(join(tmpdir(), 'dsh-jev-guard-'))),
     pendingAsks: new PendingAsks(),
-    permissionPresets: undefined,
+    permissionPresets: () => undefined,
     ...rest,
   }
 }
@@ -94,7 +94,7 @@ describe('createGuardListener', () => {
     let calls = 0
     const listener = createGuardListener(await makeDeps({
       classify: async () => { calls += 1; return fakeResult() },
-      permissionPresets: { current: () => 'auto' },
+      permissionPresets: () => ({ current: () => 'auto' }),
     }))
     await listener(fakeExec(), nextAllow)
     expect(calls).toBe(0)
@@ -145,7 +145,7 @@ describe('createGuardListener', () => {
     const listener = createGuardListener(deps)
     const decision = await listener(fakeExec(), nextAllow)
     expect(decision.kind).toBe('ask')
-    expect(deps.pendingAsks.take('call-1' as ToolCallId)?.argsPreview).toContain('npm test')
+    expect(deps.pendingAsks.take('session-1', 'call-1' as ToolCallId, 'bash')?.argsPreview).toContain('npm test')
   })
 
   it('never enforces in shadow mode', async () => {

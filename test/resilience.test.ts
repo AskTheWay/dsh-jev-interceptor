@@ -57,15 +57,13 @@ describe('Semaphore', () => {
   it('caps concurrent holders and queues the rest in order', async () => {
     const semaphore = new Semaphore(2)
     const order: number[] = []
-    const first = semaphore.acquire(new AbortController().signal)
-    const second = semaphore.acquire(new AbortController().signal)
-    expect(await first).toBe(true)
-    expect(await second).toBe(true)
-    const third = semaphore.acquire(new AbortController().signal).then((ok) => {
-      if (ok) order.push(3)
+    expect(await semaphore.acquire(new AbortController().signal)).toBe('acquired')
+    expect(await semaphore.acquire(new AbortController().signal)).toBe('acquired')
+    const third = semaphore.acquire(new AbortController().signal).then((outcome) => {
+      if (outcome === 'acquired') order.push(3)
     })
-    const fourth = semaphore.acquire(new AbortController().signal).then((ok) => {
-      if (ok) order.push(4)
+    const fourth = semaphore.acquire(new AbortController().signal).then((outcome) => {
+      if (outcome === 'acquired') order.push(4)
     })
     semaphore.release()
     semaphore.release()
@@ -73,13 +71,39 @@ describe('Semaphore', () => {
     expect(order).toEqual([3, 4])
   })
 
-  it('resolves queued acquires false when the caller aborts', async () => {
+  it('resolves queued acquires with aborted when the caller aborts', async () => {
     const semaphore = new Semaphore(1)
-    expect(await semaphore.acquire(new AbortController().signal)).toBe(true)
+    expect(await semaphore.acquire(new AbortController().signal)).toBe('acquired')
     const controller = new AbortController()
     const queued = semaphore.acquire(controller.signal)
     controller.abort()
-    expect(await queued).toBe(false)
+    expect(await queued).toBe('aborted')
+    semaphore.release()
+  })
+
+  it('regression: an aborted queuer leaves no dead entry, later acquires still succeed', async () => {
+    // The leak this guards against: release() once handed the freed slot to an
+    // already-aborted queue entry without decrementing, so after enough leaked
+    // entries every later acquire hung forever.
+    const semaphore = new Semaphore(2)
+    expect(await semaphore.acquire(new AbortController().signal)).toBe('acquired')
+    expect(await semaphore.acquire(new AbortController().signal)).toBe('acquired')
+    const controller = new AbortController()
+    const queued = semaphore.acquire(controller.signal)
+    controller.abort()
+    expect(await queued).toBe('aborted')
+    // A holder releases; the dead entry must be discarded, not handed the slot.
+    semaphore.release()
+    const fresh = semaphore.acquire(new AbortController().signal, 500)
+    expect(await fresh).toBe('acquired')
+    semaphore.release()
+    semaphore.release()
+  })
+
+  it('resolves queued acquires with timeout when the queue bound elapses', async () => {
+    const semaphore = new Semaphore(1)
+    expect(await semaphore.acquire(new AbortController().signal)).toBe('acquired')
+    expect(await semaphore.acquire(new AbortController().signal, 30)).toBe('timeout')
     semaphore.release()
   })
 })

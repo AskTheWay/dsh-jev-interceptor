@@ -33,36 +33,53 @@ import type { Telemetry } from './telemetry.js'
 export interface PendingAsk {
   readonly tool: string
   readonly argsPreview: string
+  readonly createdAt: number
 }
 
+/** Entries older than this bound are stale on sight; a hygiene constant, not a deployment tunable. */
+const PENDING_ASK_STALE_MS = 10 * 60_000
+
 /**
- * Bounded store of guard escalations, keyed by call id, that the pre-approval
- * answerer consumes for its argument preview.
+ * Bounded store of guard escalations keyed by `sessionId:callId` — provider
+ * call ids are NOT unique across concurrent sessions (they can collide as
+ * `call_0` in parallel subagent loops), so the session id must disambiguate.
+ * The pre-approval answerer consumes an entry only when it is fresh and its
+ * tool matches the request, so a stale or mismatched entry never supplies the
+ * argument evidence for an auto-approval.
  */
 export class PendingAsks {
   private readonly asks = new Map<string, PendingAsk>()
 
   /**
    * Record one escalation.
+   * @param sessionId - session that owns the escalated call.
    * @param callId - the escalated tool call.
    * @param ask - bounded context for the pre-approval question.
    */
-  set(callId: string, ask: PendingAsk): void {
+  set(sessionId: string, callId: string, ask: Omit<PendingAsk, 'createdAt'>): void {
     if (this.asks.size >= 64) {
       const oldest = this.asks.keys().next()
       if (oldest.done !== true) this.asks.delete(oldest.value)
     }
-    this.asks.set(callId, ask)
+    this.asks.set(`${sessionId}\0${callId}`, { ...ask, createdAt: Date.now() })
   }
 
   /**
-   * Take (remove) the context recorded for one call.
+   * Take (remove) the context recorded for one call, but only when it is
+   * fresh and belongs to the asking tool.
+   * @param sessionId - session that owns the approval request.
    * @param callId - the call being approved.
-   * @returns the recorded context, or `undefined` when the ask came from elsewhere.
+   * @param toolName - the tool the approval question names.
+   * @returns the matching fresh context, or `undefined` (the entry is
+   *   dropped either way — a miss must never be retried against stale data).
    */
-  take(callId: string): PendingAsk | undefined {
-    const ask = this.asks.get(callId)
-    this.asks.delete(callId)
+  take(sessionId: string, callId: string, toolName: string): PendingAsk | undefined {
+    const key = `${sessionId}\0${callId}`
+    const ask = this.asks.get(key)
+    this.asks.delete(key)
+    if (ask === undefined) return undefined
+    if (ask.tool !== toolName) return undefined
+    if (Date.now() - ask.createdAt > PENDING_ASK_STALE_MS) return undefined
     return ask
   }
 }
@@ -80,8 +97,12 @@ export interface GuardDeps {
   readonly jev: JevClient
   readonly telemetry: Telemetry
   readonly pendingAsks: PendingAsks
-  /** Present when the permission-presets service is loaded; used to yield to auto-review. */
-  readonly permissionPresets: { current(session: Session): string } | undefined
+  /**
+   * Lazy per-event resolver for the permission-presets service: captured once
+   * at apply() it could miss a service that activates later, so the listener
+   * re-resolves it the way `resolveKey` re-resolves credentials.
+   */
+  readonly permissionPresets: () => { current(session: Session): string } | undefined
 }
 
 /** The one fan-out every guard classification asks. */
@@ -194,8 +215,9 @@ async function evaluateGuard(deps: GuardDeps, exec: ToolExecution): Promise<Guar
   // The outer run_code transport is excluded (its inner calls are classified); mirrors auto-review.
   if (exec.parent === undefined && exec.name === RUN_CODE_NAME) return undefined
   if (deps.readOnlyTools.has(exec.name) || deps.excludeTools.has(exec.name)) return undefined
-  if (deps.permissionPresets !== undefined
-    && deps.permissionPresets.current(exec.agent.session) === AUTO_PRESET) {
+  const permissionPresets = deps.permissionPresets()
+  if (permissionPresets !== undefined
+    && permissionPresets.current(exec.agent.session) === AUTO_PRESET) {
     return undefined
   }
 
@@ -248,7 +270,10 @@ async function evaluateGuard(deps: GuardDeps, exec: ToolExecution): Promise<Guar
   })
   // Stash the bounded argument preview for the pre-approval question.
   if (action.kind === 'ask' || action.kind === 'deny') {
-    deps.pendingAsks.set(exec.callId, { tool: exec.name, argsPreview: state.args_preview })
+    deps.pendingAsks.set(session.id, exec.callId, {
+      tool: exec.name,
+      argsPreview: state.args_preview,
+    })
   }
   return action
 }

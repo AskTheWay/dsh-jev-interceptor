@@ -67,13 +67,16 @@ export class CooldownGate {
 }
 
 /**
- * FIFO counting semaphore. Acquire resolves `false` when the caller's signal
- * aborts while queued, so a cancelled tool call never waits on the limiter.
+ * FIFO counting semaphore. Acquire resolves with a failure outcome when the
+ * caller's signal aborts or the optional queue timeout elapses while waiting;
+ * a failed waiter marks its queue entry settled so {@link Semaphore.release}
+ * can discard the dead entry instead of handing it a slot it will never use —
+ * the counter and queue therefore stay balanced across cancellations.
  */
 export class Semaphore {
   private readonly max: number
   private inFlight = 0
-  private readonly queue: Array<() => void> = []
+  private readonly queue: Array<QueueEntry> = []
 
   /**
    * @param max - maximum concurrent holders.
@@ -85,35 +88,68 @@ export class Semaphore {
   /**
    * Enter the semaphore.
    * @param signal - caller cancellation observed while waiting in queue.
-   * @returns `true` when a slot was acquired (pair with {@link Semaphore.release}),
-   *   `false` when the signal aborted first.
+   * @param timeoutMs - optional wall-clock bound on queueing; a queuer that
+   *   exceeds it resolves `timeout` instead of hanging behind a stall.
+   * @returns `acquired` (pair with {@link Semaphore.release}), or the failure
+   *   mode that ended the wait.
    */
-  acquire(signal: AbortSignal): Promise<boolean> {
+  acquire(signal: AbortSignal, timeoutMs?: number): Promise<AcquireOutcome> {
     if (this.inFlight < this.max) {
       this.inFlight += 1
-      return Promise.resolve(true)
+      return Promise.resolve<AcquireOutcome>('acquired')
     }
-    return new Promise((resolve) => {
-      const settle = (acquired: boolean): void => {
-        signal.removeEventListener('abort', onAbort)
-        resolve(acquired)
+    const entry: QueueEntry = { settled: false, dispose: () => {}, finish: () => {} }
+    const settled = new Promise<AcquireOutcome>((resolve) => {
+      const finish = (outcome: AcquireOutcome): void => {
+        if (entry.settled) return
+        entry.settled = true
+        entry.dispose()
+        resolve(outcome)
       }
-      const onAbort = (): void => settle(false)
+      entry.finish = finish
+      const onAbort = (): void => finish('aborted')
       signal.addEventListener('abort', onAbort, { once: true })
-      this.queue.push(() => settle(true))
+      const timer = timeoutMs === undefined ? undefined : setTimeout(() => finish('timeout'), timeoutMs)
+      entry.dispose = () => {
+        signal.removeEventListener('abort', onAbort)
+        if (timer !== undefined) clearTimeout(timer)
+      }
     })
+    // A release() between promise construction and push cannot exist: release
+    // only runs from a holder, and this caller is by construction a queuer.
+    this.queue.push(entry)
+    return settled
   }
 
   /** Release a slot acquired by a successful {@link Semaphore.acquire}. */
   release(): void {
-    const next = this.queue.shift()
-    if (next === undefined) {
-      this.inFlight -= 1
+    // Skip settled (aborted/timed-out) waiters: they never held a slot, so
+    // discarding them keeps the counter balanced. The first live waiter
+    // inherits the freed slot without an inFlight dip.
+    for (;;) {
+      const entry = this.queue.shift()
+      if (entry === undefined) {
+        this.inFlight -= 1
+        return
+      }
+      if (entry.settled) continue
+      entry.finish('acquired')
       return
     }
-    // The queued waiter inherits the slot without an inFlight dip.
-    next()
   }
+}
+
+/** Outcome of one semaphore acquisition attempt. */
+export type AcquireOutcome = 'acquired' | 'aborted' | 'timeout'
+
+/** One queued acquisition attempt. */
+interface QueueEntry {
+  /** Whether this entry already resolved (acquired, aborted, or timed out). */
+  settled: boolean
+  /** Detaches the abort listener and queue timer. */
+  dispose: () => void
+  /** Resolves the wait exactly once; no-op after the first resolution. */
+  finish: (outcome: AcquireOutcome) => void
 }
 
 /**

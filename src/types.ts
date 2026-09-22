@@ -134,6 +134,10 @@ export function parseAnswers(body: unknown): JevAnswers {
       if (typeof raw['choice'] !== 'string') throw new Error(`jev: choice answer "${id}" lacks a selection`)
       if (!isProbability(raw['confidence'])) throw new Error(`jev: choice answer "${id}" lacks confidence`)
       if (!isRecord(raw['probabilities'])) throw new Error(`jev: choice answer "${id}" lacks probabilities`)
+      for (const member of Object.values(raw['probabilities'])) {
+        // A non-numeric member would detonate later formatting; reject at the parse boundary.
+        if (!isProbability(member)) throw new Error(`jev: choice answer "${id}" has a non-numeric probability`)
+      }
       answers[id] = {
         type: 'choice',
         choice: raw['choice'],
@@ -147,11 +151,18 @@ export function parseAnswers(body: unknown): JevAnswers {
       if (typeof raw['score'] !== 'number' || !Number.isFinite(raw['score'])) {
         throw new Error(`jev: score answer "${id}" lacks a score`)
       }
+      let probabilities: Record<string, number> | undefined
+      if (isRecord(raw['probabilities'])) {
+        for (const member of Object.values(raw['probabilities'])) {
+          if (!isProbability(member)) throw new Error(`jev: score answer "${id}" has a non-numeric probability`)
+        }
+        probabilities = raw['probabilities'] as Record<string, number>
+      }
       answers[id] = {
         type: 'score',
         score: raw['score'],
         confidence: raw['confidence'],
-        ...(isRecord(raw['probabilities']) ? { probabilities: raw['probabilities'] as Record<string, number> } : {}),
+        ...(probabilities === undefined ? {} : { probabilities }),
       }
       continue
     }

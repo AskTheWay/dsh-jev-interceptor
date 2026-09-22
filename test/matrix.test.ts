@@ -24,9 +24,9 @@ describe('decideGuard', () => {
     expect(decideGuard(answers(), thresholds)).toEqual({ kind: 'delegate' })
   })
 
-  it('escalates low risk with confidence below the floor instead of acting', () => {
+  it('delegates low risk with confidence below the floor (low confidence never acts)', () => {
     const low = answers({ risk: { type: 'choice', choice: 'low', probabilities: { low: 0.7, medium: 0.2, high: 0.1 }, confidence: 0.5 } })
-    expect(decideGuard(low, thresholds).kind).toBe('ask')
+    expect(decideGuard(low, thresholds).kind).toBe('delegate')
   })
 
   it('escalates low risk that is possibly irreversible', () => {
@@ -73,28 +73,32 @@ describe('decideGuard', () => {
 })
 
 describe('decidePreapprove', () => {
-  const thresholds = { autoApproveMin: 0.85, irreversibleMax: 0.15 }
+  const thresholds = { autoApproveMin: 0.85, irreversibleMax: 0.15, injectionSuspectMax: 0.5 }
 
-  it('auto-approves only confident in-scope reversible calls', () => {
-    expect(decidePreapprove(
-      { withinGrantedScope: { type: 'noul', noul: 0.9 }, reversible: { type: 'noul', noul: 0.95 } },
-      thresholds,
-    )).toEqual({ kind: 'auto-approve' })
+  interface Noul { type: 'noul'; noul: number }
+
+  function pre(overrides: Partial<Record<'withinGrantedScope' | 'reversible' | 'injectionSuspect', Noul>> = {}) {
+    return {
+      withinGrantedScope: { type: 'noul' as const, noul: 0.9 },
+      reversible: { type: 'noul' as const, noul: 0.95 },
+      injectionSuspect: { type: 'noul' as const, noul: 0.02 },
+      ...overrides,
+    }
+  }
+
+  it('auto-approves only confident in-scope reversible clean calls', () => {
+    expect(decidePreapprove(pre(), thresholds)).toEqual({ kind: 'auto-approve' })
   })
 
   it('blocks on scope doubt', () => {
-    const verdict = decidePreapprove(
-      { withinGrantedScope: { type: 'noul', noul: 0.6 }, reversible: { type: 'noul', noul: 0.95 } },
-      thresholds,
-    )
-    expect(verdict.kind).toBe('human')
+    expect(decidePreapprove(pre({ withinGrantedScope: { type: 'noul', noul: 0.6 } }), thresholds).kind).toBe('human')
   })
 
   it('blocks on irreversibility at or above the ceiling', () => {
-    const verdict = decidePreapprove(
-      { withinGrantedScope: { type: 'noul', noul: 0.95 }, reversible: { type: 'noul', noul: 0.8 } },
-      thresholds,
-    )
-    expect(verdict.kind).toBe('human')
+    expect(decidePreapprove(pre({ reversible: { type: 'noul', noul: 0.8 } }), thresholds).kind).toBe('human')
+  })
+
+  it('blocks on injection suspicion at or above the ceiling', () => {
+    expect(decidePreapprove(pre({ injectionSuspect: { type: 'noul', noul: 0.6 } }), thresholds).kind).toBe('human')
   })
 })
