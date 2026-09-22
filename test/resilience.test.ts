@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CooldownGate, LruCache, Semaphore } from '../src/resilience.js'
 
 describe('CooldownGate', () => {
-  function gate(times: number[]): { g: CooldownGate; tick: (to: number) => void } {
+  function gate(): { g: CooldownGate; tick: (to: number) => void } {
     let now = 0
     const g = new CooldownGate(3, 10_000, () => now)
     return {
@@ -14,14 +14,14 @@ describe('CooldownGate', () => {
   }
 
   it('stays closed below the failure threshold', () => {
-    const { g } = gate([])
+    const { g } = gate()
     expect(g.onFailure()).toBe(false)
     expect(g.onFailure()).toBe(false)
     expect(g.open()).toBe(false)
   })
 
   it('opens at the threshold and reports the transition once', () => {
-    const { g } = gate([])
+    const { g } = gate()
     g.onFailure()
     g.onFailure()
     expect(g.onFailure()).toBe(true)
@@ -30,7 +30,7 @@ describe('CooldownGate', () => {
   })
 
   it('closes after the cooldown elapses, then resets the streak on success', () => {
-    const { g, tick } = gate([])
+    const { g, tick } = gate()
     g.onFailure()
     g.onFailure()
     g.onFailure()
@@ -43,7 +43,7 @@ describe('CooldownGate', () => {
   })
 
   it('one success resets an in-progress streak', () => {
-    const { g } = gate([])
+    const { g } = gate()
     g.onFailure()
     g.onFailure()
     g.onSuccess()

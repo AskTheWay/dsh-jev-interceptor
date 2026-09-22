@@ -24,7 +24,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "node -e \"fs.rmSync('lib', {force: true, recursive: true})\" --input-type=module 2>/dev/null || rimraf lib",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "prepare": "npm run build"
   },

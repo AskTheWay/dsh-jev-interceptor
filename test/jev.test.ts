@@ -2,7 +2,7 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { JevClient } from '../src/jev.js'
+import { JevClient, type ClassifyCall } from '../src/jev.js'
 import { Telemetry } from '../src/telemetry.js'
 
 function okBody(): Response {
@@ -32,7 +32,7 @@ async function makeClient(fetchFn: typeof fetch): Promise<{ client: JevClient; d
   return { client, dir }
 }
 
-const call = { tag: 'guard' as const, mode: 'enforce' as const, tool: 'bash', state: { a: 1 }, questions: { is_urgent: { type: 'noul', instructions: 'urgent?' } } }
+const call: ClassifyCall = { tag: 'guard', mode: 'enforce', tool: 'bash', state: { a: 1 }, questions: { is_urgent: { type: 'noul', instructions: 'urgent?' } } }
 
 describe('JevClient', () => {
   it('returns parsed answers with usage and estimated cost', async () => {

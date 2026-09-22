@@ -2,8 +2,8 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import type { ToolCallId, ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
-import type { PreToolDecision } from '@deepseek-ai/dsh-tools'
+import type { PreToolDecision, ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { createGuardListener, PendingAsks, type GuardDeps } from '../src/guard.js'
 import type { JevClient, ClassifyResult } from '../src/jev.js'
 import { Telemetry } from '../src/telemetry.js'
@@ -24,7 +24,7 @@ function fakeExec(overrides: Partial<ToolExecution> = {}): ToolExecution {
         header: { cwd: '/work/project' },
         deriveMessages: () => [{ role: 'user', content: [{ type: 'text', text: 'run the tests' }] }],
       },
-    } as ToolExecution['agent'],
+    } as unknown as ToolExecution['agent'],
     ...overrides,
   } as ToolExecution
 }
@@ -46,7 +46,7 @@ function fakeResult(overrides: Partial<ClassifyResult> = {}): ClassifyResult {
   }
 }
 
-function makeDeps(overrides: Partial<GuardDeps> & { classify?: () => Promise<ClassifyResult | null> } = {}): GuardDeps {
+async function makeDeps(overrides: Partial<GuardDeps> & { classify?: () => Promise<ClassifyResult | null> } = {}): Promise<GuardDeps> {
   const { classify, ...rest } = overrides
   const stub = { classify: classify ?? (async () => fakeResult()) } as unknown as JevClient
   return {
@@ -77,7 +77,7 @@ const nextAllow = async (): Promise<PreToolDecision> => ({ kind: 'allow' })
 describe('createGuardListener', () => {
   it('delegates read-only tools without spending a Jev call', async () => {
     let calls = 0
-    const listener = createGuardListener(makeDeps({ classify: async () => { calls += 1; return fakeResult() } }))
+    const listener = createGuardListener(await makeDeps({ classify: async () => { calls += 1; return fakeResult() } }))
     const decision = await listener(fakeExec({ name: 'read' }), nextAllow)
     expect(decision).toEqual({ kind: 'allow' })
     expect(calls).toBe(0)
@@ -85,14 +85,14 @@ describe('createGuardListener', () => {
 
   it('delegates the outer run_code transport', async () => {
     let calls = 0
-    const listener = createGuardListener(makeDeps({ classify: async () => { calls += 1; return fakeResult() } }))
+    const listener = createGuardListener(await makeDeps({ classify: async () => { calls += 1; return fakeResult() } }))
     await listener(fakeExec({ name: 'run_code' }), nextAllow)
     expect(calls).toBe(0)
   })
 
   it('yields to auto-review when the Auto preset is active', async () => {
     let calls = 0
-    const listener = createGuardListener(makeDeps({
+    const listener = createGuardListener(await makeDeps({
       classify: async () => { calls += 1; return fakeResult() },
       permissionPresets: { current: () => 'auto' },
     }))
@@ -101,19 +101,19 @@ describe('createGuardListener', () => {
   })
 
   it('delegates when the provider degrades', async () => {
-    const listener = createGuardListener(makeDeps({ classify: async () => null }))
+    const listener = createGuardListener(await makeDeps({ classify: async () => null }))
     expect(await listener(fakeExec(), nextAllow)).toEqual({ kind: 'allow' })
   })
 
   it('delegates when classification throws', async () => {
-    const listener = createGuardListener(makeDeps({ classify: async () => {
+    const listener = createGuardListener(await makeDeps({ classify: async () => {
       throw new Error('provider exploded')
     } }))
     expect(await listener(fakeExec(), nextAllow)).toEqual({ kind: 'allow' })
   })
 
   it('denies a confident high-risk irreversible call', async () => {
-    const listener = createGuardListener(makeDeps({
+    const listener = createGuardListener(await makeDeps({
       classify: async () => fakeResult({
         answers: {
           risk: { type: 'choice', choice: 'high', probabilities: { high: 0.9 }, confidence: 0.9 },
@@ -132,7 +132,7 @@ describe('createGuardListener', () => {
   })
 
   it('asks on medium risk and stashes the preview for the pre-approver', async () => {
-    const deps = makeDeps({
+    const deps = await makeDeps({
       classify: async () => fakeResult({
         answers: {
           risk: { type: 'choice', choice: 'medium', probabilities: { medium: 0.8 }, confidence: 0.8 },
@@ -149,7 +149,7 @@ describe('createGuardListener', () => {
   })
 
   it('never enforces in shadow mode', async () => {
-    const listener = createGuardListener(makeDeps({
+    const listener = createGuardListener(await makeDeps({
       mode: 'shadow',
       classify: async () => fakeResult({
         answers: {
