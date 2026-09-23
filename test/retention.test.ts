@@ -168,6 +168,35 @@ describe('retainScoredSession — scored mode', () => {
     const fifo = retainScoredSession(snap, 'l', budget, null)
     expect(scored?.data.conversation.map(item => item.text)).toEqual(fifo?.data.conversation.map(item => item.text))
   })
+
+  it('regression: score keys stay aligned across multiple drops (no splice shift)', () => {
+    // Two drops required. Under the old position-keyed lookup, dropping the
+    // first message shifted positions so the CRITICAL third message inherited
+    // the dropped message's score and got sacrificed next. Original-index
+    // keying must keep it: drop B (0.0) then A (0.3), keep C (1.0).
+    const snap = snapshot([
+      { role: 'user', text: 'A: routine opener '.repeat(6) },     // original 0, score 0.3
+      { role: 'user', text: 'B: pure noise '.repeat(6) },         // original 1, score 0.0
+      { role: 'user', text: 'C: ERROR evidence, keep me' },       // original 2, score 1.0
+      { role: 'assistant', text: 'D: newest' },                   // newest, protected
+    ])
+    const roomy = retainScoredSession(snap, 'l', 100_000, null)
+    // Budget that forces exactly two whole-message drops: the size of the
+    // conversation minus its two oldest items, minus a little slack.
+    const afterTwoDrops = retainScoredSession(snapshot([
+      { role: 'user', text: 'C: ERROR evidence, keep me' },
+      { role: 'assistant', text: 'D: newest' },
+    ]), 'l', 100_000, null)
+    const budget = sizeOf(afterTwoDrops!)
+    const scores = new Map([[0, 0.3], [1, 0.0], [2, 1.0]])
+    const scored = retainScoredSession(snap, 'l', budget, scores)
+    expect(scored?.stats.omittedMessages).toBe(2)
+    const kept = scored?.data.conversation.map(item => item.text) ?? []
+    expect(kept.some(text => text.includes('ERROR evidence'))).toBe(true)
+    expect(kept.some(text => text.includes('pure noise'))).toBe(false)
+    expect(kept.some(text => text.includes('routine opener'))).toBe(false)
+    expect(sizeOf(scored!)).toBeLessThanOrEqual(budget)
+  })
 })
 
 describe('projection helpers', () => {

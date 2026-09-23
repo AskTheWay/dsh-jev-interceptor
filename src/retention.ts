@@ -39,6 +39,8 @@ interface ProjectedItem {
   checkpoint: boolean
   originalText: string
   omittedBytes: number
+  /** Index into the ORIGINAL projection — the key scores are addressed by; stays stable across splices. */
+  originalIndex: number
 }
 
 /** Snapshot data serialized inside the untrusted prompt (upstream shape). */
@@ -96,12 +98,12 @@ export function projectConversation(snapshot: SessionSurfaceSnapshot): Projected
       const checkpoint = isCompactCheckpointSource(event.data.source)
       if (!checkpoint && event.data.source.kind !== 'user') continue
       const text = textContent(event.data.content)
-      if (text !== '') conversation.push({ role: 'user', text, checkpoint, originalText: text, omittedBytes: 0 })
+      if (text !== '') conversation.push({ role: 'user', text, checkpoint, originalText: text, omittedBytes: 0, originalIndex: conversation.length })
       continue
     }
     if (event.type === 'assistant/message') {
       const text = textContent(event.data.message.content)
-      if (text !== '') conversation.push({ role: 'assistant', text, checkpoint: false, originalText: text, omittedBytes: 0 })
+      if (text !== '') conversation.push({ role: 'assistant', text, checkpoint: false, originalText: text, omittedBytes: 0, originalIndex: conversation.length })
     }
   }
   return conversation
@@ -152,6 +154,8 @@ export function retainScoredSession(
   // Phase 1 — drop whole messages until the preview fits. Upstream drops the
   // first droppable (FIFO); scored mode drops the LOWEST-SCORED droppable,
   // oldest first on ties (so unscored items degrade back to FIFO order).
+  // Scores are keyed by ORIGINAL projection index; positions shift on every
+  // splice, so lookups go through each item's stable `originalIndex`.
   while (size() > maxBytes) {
     const droppable = droppableIndices(retained)
     if (droppable.length === 0) break
@@ -159,7 +163,9 @@ export function retainScoredSession(
     if (scores !== null) {
       let bestScore = Number.POSITIVE_INFINITY
       for (const index of droppable) {
-        const score = scores.get(index)
+        const item = retained[index]
+        if (item === undefined) continue
+        const score = scores.get(item.originalIndex)
         // Unsourced indices score as neutral; the oldest-first tiebreak keeps
         // behavior FIFO-equivalent among them.
         const value = score === undefined ? 0.5 : score
@@ -178,6 +184,8 @@ export function retainScoredSession(
   // Phase 2 — truncate survivors until the preview fits. Upstream shortens the
   // longest survivor; scored mode shortens the survivor with the highest
   // wasted bytes (length × droppability), cutting padding before substance.
+  // Target lookups address scores through `originalIndex` for the same
+  // splice-stability reason as phase 1.
   while (size() > maxBytes) {
     let targetIndex = -1
     let targetBytes = 0
@@ -190,7 +198,7 @@ export function retainScoredSession(
         longestIndex = index
       }
       if (scores !== null) {
-        const score = scores.get(index)
+        const score = scores.get(item.originalIndex)
         const dropability = score === undefined ? 0.5 : 1 - score
         const wasted = bytes * dropability
         if (wasted > targetBytes) {
