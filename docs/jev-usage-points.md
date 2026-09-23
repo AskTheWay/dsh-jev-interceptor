@@ -15,12 +15,13 @@ dsh is an everything-is-a-plugin Cordis harness: every decision point is an asyn
 
 ## Decision-point inventory
 
-### This plugin (v0.1) — the approval loop
+### This plugin (v0.1–v0.2) — approval loop + session retention
 
 | # | Decision point | Today | Jev's role | Fit |
 |---|---|---|---|---|
 | 1 | **Tool-call risk gate** — `tools/pre-execute` (`core/tools/src/index.ts:146`, dispatch `:1482-1505`) | Waterfall default is plain `allow`; base ships no per-call classifier. The only precedent, `experimental/auto-review`, uses a *generative* LLM at temperature 0 with a hand-written JSON text protocol for a low/medium/high classification | One fan-out per call: risk `choice` + irreversible / matches-task / injection-suspect `noul`s. High-confidence + irreversible → deny; medium → ask; low → delegate | 🟢 |
 | 2 | **Approval pre-answer** — `approval/request` (`user-approval/src/types.ts:85-89`) | Only human answerers (Web UI / ACP bridge); every `ask` costs a human round trip | First answerer: within-granted-scope + reversible `noul`s; auto-approves only allowlisted tools at high confidence, else defers to the human | 🟢 |
+| 3 | **Session-snapshot retention** (v0.2) — `session-reference/src/projection.ts:93-128` | FIFO drop + longest-first truncation; zero semantics | Subclassed resolver scores each droppable message (*noise→critical*) in one fan-out; drops least-valuable first, truncates padding before substance; `disabled`/shadow modes stay byte-for-byte upstream | 🟢 |
 
 Hooks 1 + 2 are one loop: base has no built-in `ask` source, so most approval traffic is the guard's own escalations.
 
@@ -28,12 +29,11 @@ Hooks 1 + 2 are one loop: base has no built-in `ask` source, so most approval tr
 
 | # | Decision point | Today | Jev's role | Fit |
 |---|---|---|---|---|
-| 3 | **Content-aware model routing** — `agent/request` (`core/agent/src/runtime-types.ts:337`) | The two existing listeners are user/UI-explicit only; no content-driven routing exists | Complexity `score` + route `choice` over a whitelist of registered routes; needs hysteresis (route flips invalidate the KV-cache prefix) | 🟢 |
-| 4 | **Subagent model default** — `tool-subagent/src/model-selection.ts:99` | A model-omitted delegation silently inherits the parent route | One `choice` at the child's first step from the delegation prompt | 🟢 |
-| 5 | **Ralph worker-report verification** — `workflow/tool-ralph/src/index.ts:281-331` | The script's own comment: "Completion and blockers are worker reports, not independent evaluation" (`:408`); status is worker self-report | confirm / overturn-to-continue / overturn-to-blocked `choice` over the bounded report (16k-char cap) | 🟢 |
-| 6 | **Goal round continuation** — `goal-round-driver/src/index.ts:164-192` | `roundsStarted < maxGoalRounds` unconditionally continues; no progress judgment | progress `score` + continue `noul` over objective + last round's output | 🟢 |
-| 7 | **Image-offload pre-planning** — `compaction-image-offload` (README admits "nothing plans an offload before dispatch") | FIFO offload after a failed request | Per-image residual-value `score` before the request, offloading only high-confidence sacrificial images | 🟢 |
-| 8 | **Session-reference keep/drop** — `context/session-reference/src/projection.ts:93-128` | FIFO drop + longest-first truncation; zero semantics | Per-message value `score` for drop order and truncation target (one-shot pre-step call, latency-tolerant) | 🟢 |
+| 4 | **Content-aware model routing** — `agent/request` (`core/agent/src/runtime-types.ts:337`) | The two existing listeners are user/UI-explicit only; no content-driven routing exists | Complexity `score` + route `choice` over a whitelist of registered routes; needs hysteresis (route flips invalidate the KV-cache prefix) | 🟢 |
+| 5 | **Subagent model default** — `tool-subagent/src/model-selection.ts:99` | A model-omitted delegation silently inherits the parent route | One `choice` at the child's first step from the delegation prompt | 🟢 |
+| 6 | **Ralph worker-report verification** — `workflow/tool-ralph/src/index.ts:281-331` | The script's own comment: "Completion and blockers are worker reports, not independent evaluation" (`:408`); status is worker self-report | confirm / overturn-to-continue / overturn-to-blocked `choice` over the bounded report (16k-char cap) | 🟢 |
+| 7 | **Goal round continuation** — `goal-round-driver/src/index.ts:164-192` | `roundsStarted < maxGoalRounds` unconditionally continues; no progress judgment | progress `score` + continue `noul` over objective + last round's output | 🟢 |
+| 8 | **Image-offload pre-planning** — `compaction-image-offload` (README admits "nothing plans an offload before dispatch") | FIFO offload after a failed request | Per-image residual-value `score` before the request, offloading only high-confidence sacrificial images | 🟢 |
 | 9 | **Spill preview tiering** — `spill/spill-policy/src/index.ts:197-220` | Fixed byte budget head+tail preview | Tier `choice` (tiny/short/standard/generous) by task value; must preserve the never-exceed-cap and never-isError invariants | 🟡 |
 | 10 | **Stagnation detection** — `tools/post-execute` (`repeat-tool-reminder` covers exact repeats only) | Exact-match repeat detection; cross-parameter loops invisible | "no progress across differing attempts" `noul` over a bounded failure window | 🟡 |
 | 11 | **Search rerank** — `session-query-sqlite/src/index.ts:670-707` | FTS5 match_count ordering, no semantics | Query×snippet relevance `score`, page-local only (pagination determinism) | 🟡 |

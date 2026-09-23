@@ -27,8 +27,16 @@ import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 // typechecks; the service itself is consumed structurally and the package is
 // not a runtime dependency.
 import type {} from '@deepseek-ai/dsh-permission-presets'
-import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
+import type { CommandDefinitionId as CommandDefinitionIdBrand } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
+
+/**
+ * Command definition brand, mirrored locally instead of imported: the brand
+ * function is named `CommandDefinitionId` only in newer dsh API generations
+ * (older runtimes export it under different names or not at all), and a plain
+ * branded string passes structural validation wherever the field is known.
+ */
+const jevStatsDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-stats' as CommandDefinitionIdBrand
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import { Config, resolveEndpoint, resolveSettings } from './config.js'
 import { JevClient } from './jev.js'
@@ -148,7 +156,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.inject(['commands'], (commandsCtx) => {
     void commandsCtx.commands.register({
-      definitionId: CommandDefinitionId('dsh-jev-interceptor:jev-stats'),
+      definitionId: jevStatsDefinitionId,
       name: 'jev-stats',
       description: 'Show dsh-jev-interceptor decision statistics',
       handler: async (): Promise<CommandResult> => ({ kind: 'success', text: await telemetry.stats() }),

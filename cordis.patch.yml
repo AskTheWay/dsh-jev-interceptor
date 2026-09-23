@@ -1,6 +1,25 @@
-# The dsh-jev-interceptor bundle layer: one opt-in plugin row.
-# Users enable it through cordis.yml config (`enabled: true`) or the
-# dsh settings surface; the plugin's schema defaults keep it inert.
+# The dsh-jev-interceptor bundle layer.
+#
+# Row 1 (jev-interceptor): the tools/pre-execute guard and approval/request
+# pre-approver. Inert until `enabled: true` in config.
+#
+# Rows 2-3 take over the upstream session-reference row by subclassing its
+# resolver: the replacement inherits @-mention discovery, the remote
+# candidates face, budgets, spill, and cancellation unchanged, and
+# `sessionReferenceEnabled: false` (default) renders byte-for-byte like the
+# upstream resolver. Correct way to remove this takeover: disable the whole
+# bundle layer (setBundleEnabled false), which restores the original row —
+# disabling only the jev-session-reference row would leave the original row
+# overridden and no session-reference plugin active.
+#
+# The session-reference override only matches in profiles that stack the
+# web-app layer (where the upstream row lives), such as the web and demo
+# profiles.
 - insert:
     - id: jev-interceptor
       name: dsh-jev-interceptor
+    - id: jev-session-reference
+      name: dsh-jev-interceptor/session-reference
+
+- id: session-reference
+  disabled: true

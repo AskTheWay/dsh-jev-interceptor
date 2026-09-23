@@ -5,14 +5,13 @@
 [![dsh plugin](https://img.shields.io/badge/dsh-plugin-8A2BE2.svg)](https://github.com/topics/dsh-plugin)
 [![Jev](https://img.shields.io/badge/powered%20by-Jev%20%7C%20System%20One-ff6b35.svg)](https://typesafe.ai)
 
-> ⚡ **Millisecond judgement for every tool call — for about two millionths of a dollar.**
+> ⚡ **Millisecond judgement for every tool call and every recalled message — for about two millionths of a dollar each.**
 >
-> Your agent's most expensive habit is asking a poetry-writing LLM yes/no questions.
-> This plugin wires [Jev](https://typesafe.ai) — the non-generative "System One" model that broke everyone's feed — straight into the two decision points of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) where an LLM is overkill and rules are blind.
+> Your agent's most expensive habits: asking a poetry-writing LLM yes/no questions, and amputating your context by *age*. This plugin wires [Jev](https://typesafe.ai) — the non-generative "System One" model that broke everyone's feed — into the decision points of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) where an LLM is overkill and rules are blind.
 
 English | [中文](README.zh.md)
 
-**What it does, in one breath:** before a tool call runs, Jev classifies its risk, irreversibility, task-fit, and injection-suspicion in one ~$0.00002 request — confident high-risk calls get denied, medium ones escalate to a human, and clearly-granted reversible ones stop wasting your clicks on approval dialogs. Every doubt, every timeout, every missing key degrades to stock dsh behavior. Nothing to configure away, nothing that can widen a permission.
+**What it does, in one breath:** before a tool call runs, Jev classifies its risk, irreversibility, task-fit, and injection-suspicion in one ~$0.00002 request — confident high-risk calls get denied, medium ones escalate to a human, and clearly-granted reversible ones stop wasting your clicks on approval dialogs. And when an `@session` snapshot gets injected, Jev scores every message's value for the citing task so the **error traceback survives the byte budget instead of the oldest small talk**. Every doubt, every timeout, every missing key degrades to stock dsh behavior. Nothing to configure away, nothing that can widen a permission.
 
 ## Why this exists
 
@@ -29,6 +28,14 @@ dsh ships **zero per-call risk classification** — the pre-execute waterfall's 
 Jev's maker TypeSafe reports up to **200× faster / 400× cheaper** than LLMs on classification workflows — and this plugin is that number, landed in a real agent harness, with receipts in `/jev-stats`.
 
 We believe this is the **first System-1 decision plugin in the dsh ecosystem**. The full map of where decision models fit in dsh — this plugin's two hooks plus eleven more verified hooks (semantic model routing, context-retention scoring, image-offload pre-planning, worker-report verification...) — is in [docs/jev-usage-points.md](docs/jev-usage-points.md).
+
+## The FIFO pain point nobody talks about
+
+When you `@`-mention a past session in dsh, the harness injects a bounded snapshot of it — and when that snapshot exceeds its byte budget, it drops messages **oldest-first**. Pure FIFO. Zero semantics. The bug report you pasted at the top of the session and the three-line question that started it all? Dropped first. The "thanks!" and "ok, continue"? Kept — they were newer.
+
+dsh's own retention code is honest about it: drop the oldest, then truncate the longest, done. This plugin's `jev-session-reference` row takes that decision over (by subclassing the upstream resolver, so `@`-completion, budgets, spill, and cancellation stay inherited): one Jev fan-out scores each droppable message — *noise / background / relevant / critical* — and the drop order becomes **least valuable first**, with truncation cutting padding before substance. Checkpoints and the newest message stay protected exactly as upstream; the byte budget is honored exactly as upstream; and with `sessionReferenceEnabled: false` (the default) the row renders **byte-for-byte like stock**.
+
+In shadow mode you get the receipts before trusting it: every injection logs the counterfactual — which messages FIFO dropped that scoring would have kept — then flip to `enforce`.
 
 ## The 60-second tour
 
@@ -67,7 +74,7 @@ Happy with the numbers? Flip `mode: enforce`. That's the whole rollout plan — 
 - **Resilient by construction.** Wall-clock timeout per attempt, single retry on 429/529, cooldown after consecutive failures (timeouts count), concurrency cap, LRU decision cache, queue-bound semaphore. A dead provider costs you zero behavior, not your harness.
 - **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`); `/jev-stats` aggregates it per hook.
 
-All of this is enforced by **52 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
+All of this is enforced by **63 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
 
 ## Configure
 
@@ -76,6 +83,17 @@ Everything is a config field — timeouts, cooldown, concurrency, cache, per-hoo
 - read-only tools (`read`, `read_image`, `grep`, `glob`, `todo_write`) short-circuit with **zero cost**;
 - the Auto permission preset is left entirely to `auto-review` (no double review, no double billing);
 - the pre-approval allowlist starts **empty** — until you name tools in `preapproveToolAllowlist`, nothing is ever auto-approved.
+
+Semantic session retention lives on its own row (disabled and byte-for-byte stock until you arm it):
+
+```yaml
+- id: jev-session-reference
+  config:
+    sessionReferenceEnabled: true   # false (default) = pure passthrough
+    mode: shadow                    # records would-be retention, renders stock FIFO
+    provider: openrouter
+    apiKeyEnv: OPENROUTER_API_KEY
+```
 
 OpenRouter works today with no waitlist (decisions models live on a dedicated endpoint there):
 
@@ -91,16 +109,15 @@ The client speaks the plain `state + questions` wire shape shared by TypeSafe di
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
 npm run typecheck                # src + tests, against real @deepseek-ai types
-npm test                         # vitest, 52 tests, no network
+npm test                         # vitest, 63 tests, no network
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # one real decision against a live provider
 ```
 
-## Roadmap: the other eleven hooks
+## Roadmap
 
-v0.1 holds the approval loop. The verified next frontiers — where selection, not just safety, meets System-1 ([full catalog](docs/jev-usage-points.md)):
+The approval loop (v0.1) and semantic session retention (v0.2) are in. The verified next frontiers — where selection, not just safety, meets System-1 ([full catalog](docs/jev-usage-points.md)):
 
-- **Semantic context retention** — score every message when an `@session` snapshot is injected, so the *error traceback* survives the byte budget instead of the *oldest small talk*
 - **Image-offload pre-planning** — dsh's own README admits "nothing plans an offload before dispatch"; Jev plans it
 - **Content-aware model routing** — routine steps on the cheap route, deep work on the strong one
 - **Worker-report verification** — when a subagent says "done", something checks

@@ -5,14 +5,13 @@
 [![dsh plugin](https://img.shields.io/badge/dsh-plugin-8A2BE2.svg)](https://github.com/topics/dsh-plugin)
 [![Jev](https://img.shields.io/badge/powered%20by-Jev%20%7C%20System%20One-ff6b35.svg)](https://typesafe.ai)
 
-> ⚡ **每个工具调用，毫秒级裁决——单次成本约百万分之二美元。**
+> ⚡ **每个工具调用、每条被召回的消息，毫秒级裁决——单次成本约百万分之二美元。**
 >
-> 你的 agent 最烧钱的坏习惯：拿一个会写诗的 LLM 去回答是非题。
-> 本插件把 [Jev](https://typesafe.ai)——那个九月刷屏全网的非生成式"System One"模型——直接接进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里 LLM 大材小用、规则又全盲的两个判断点。
+> 你的 agent 最烧钱的坏习惯：拿会写诗的 LLM 回答是非题，以及**按年龄截肢你的上下文**。本插件把 [Jev](https://typesafe.ai)——那个九月刷屏全网的非生成式"System One"模型——接进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里 LLM 大材小用、规则又全盲的判断点。
 
 中文 | [English](README.md)
 
-**一口气说完它做什么：** 工具调用执行前，Jev 用一次约 $0.00002 的请求完成风险、可逆性、任务匹配度、注入嫌疑四重分类——高置信高危直接拒绝，中风险升级人工，明确授权且可逆的不再浪费你点审批弹窗。任何存疑、超时、没 key，都降级回 dsh 原生行为。不需要配置任何"退路"，也绝无放宽权限的可能。
+**一口气说完它做什么：** 工具调用执行前，Jev 用一次约 $0.00002 的请求完成风险、可逆性、任务匹配度、注入嫌疑四重分类——高置信高危直接拒绝，中风险升级人工，明确授权且可逆的不再浪费你点审批弹窗。而当 `@` 引用旧会话注入快照时，Jev 逐消息给它对当前任务的价值打分——**让错误堆栈活过字节预算，而不是最旧的那句寒暄**。任何存疑、超时、没 key，都降级回 dsh 原生行为。不需要配置任何"退路"，也绝无放宽权限的可能。
 
 ## 为什么值得做
 
@@ -29,6 +28,14 @@ dsh 出厂**没有任何逐调用风险分类**——pre-execute 瀑布的兜底
 TypeSafe 官方宣称 Jev 在分类工作负载上比 LLM 快最高 **200 倍、便宜最高 400 倍**——本插件就是把这个数字落进真实 agent harness，收据在 `/jev-stats` 里。
 
 我们相信这是 **dsh 生态第一个 System-1 决策插件**。决策模型在 dsh 中的完整地图——本插件的两个挂点 + 另外十一个已核实挂点（语义模型路由、上下文保留打分、图像卸载预规划、工人报告核验……）——见 [docs/jev-usage-points.zh.md](docs/jev-usage-points.zh.md)。
+
+## 没人谈论的 FIFO 痛点
+
+在 dsh 里 `@` 引用一个旧会话时，harness 注入它的一份有界快照——当快照超出字节预算，就**从最旧开始丢**。纯 FIFO，零语义。你贴在会话开头的报错信息、开启整件事的三行提问？最先被丢。"谢谢！"和"好，继续"？留下了——因为更新。
+
+dsh 官方的保留算法对此很坦诚：丢最旧的、再截最长的，完事。本插件的 `jev-session-reference` 行接管这个决策（子类化官方 resolver，@ 补全、预算、溢出存储、取消全部原样继承）：一次 Jev fan-out 给每条可丢弃消息打分——*噪音 / 背景 / 相关 / 关键*——丢弃顺序变成**最没价值的先走**，截断时先砍废话再砍实质。checkpoint 和最新一条的保护与官方完全一致，字节预算的守恒与官方完全一致；`sessionReferenceEnabled: false`（默认）时这一行的渲染**与原版逐字节相同**。
+
+shadow 模式先给你收据再谈信任：每次注入都记录反事实对照——FIFO 丢掉了哪些评分本会保住的消息——看清了再切 `enforce`。
 
 ## 60 秒上手
 
@@ -67,7 +74,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **构造级韧性。** 每次尝试墙钟超时、429/529 单次重试、连续失败进冷却（超时也计数）、并发上限、LRU 决策缓存、排队有界的信号量。provider 挂掉的代价是零行为差异，不是你的 harness。
 - **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`）；`/jev-stats` 按挂点汇总。
 
-以上全部由 **52 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
+以上全部由 **63 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
 
 ## 配置
 
@@ -76,6 +83,17 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - 只读工具（`read`、`read_image`、`grep`、`glob`、`todo_write`）**零成本**直通；
 - Auto 权限预设完全让位给 `auto-review`（不双重审查、不双重计费）；
 - 预批白名单默认**为空**——在 `preapproveToolAllowlist` 里点名工具之前，任何调用都不会被自动批准。
+
+语义会话保留是独立的一行（默认关闭且逐字节等同原版）：
+
+```yaml
+- id: jev-session-reference
+  config:
+    sessionReferenceEnabled: true   # false（默认）= 纯透传
+    mode: shadow                    # 记录"会怎么保"，实际渲染仍走官方 FIFO
+    provider: openrouter
+    apiKeyEnv: OPENROUTER_API_KEY
+```
 
 OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用端点）：
 
@@ -91,16 +109,15 @@ OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用�
 ```sh
 npm install --legacy-peer-deps   # devDeps 钉在当前一代 dsh API
 npm run typecheck                # src + tests，对真实 @deepseek-ai 类型
-npm test                         # vitest，52 个测试，无需网络
+npm test                         # vitest，63 个测试，无需网络
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # 对真实 provider 跑一次决策
 ```
 
-## 路线图：另外十一个挂点
+## 路线图
 
-v0.1 守住审批闭环。已核实的下一战场——让"选择"而不只是"安全"用上 System-1（[完整目录](docs/jev-usage-points.zh.md)）：
+审批闭环（v0.1）与语义会话保留（v0.2）已落地。已核实的下一战场——让"选择"而不只是"安全"用上 System-1（[完整目录](docs/jev-usage-points.zh.md)）：
 
-- **语义上下文保留**——`@session` 快照注入时逐消息打分，让*错误堆栈*活过字节预算，而不是*最旧的寒暄*
 - **图像卸载预规划**——dsh 自己的 README 承认"nothing plans an offload before dispatch"；Jev 来规划
 - **内容感知模型路由**——例行步骤走便宜档，硬仗上强模型
 - **工人报告核验**——子代理说"做完了"，得有东西查一查

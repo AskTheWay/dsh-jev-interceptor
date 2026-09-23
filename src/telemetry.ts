@@ -11,7 +11,7 @@ import { appendFile, mkdir, readFile, stat, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 /** Where a decision came from. */
-export type DecisionTag = 'guard' | 'preapprove'
+export type DecisionTag = 'guard' | 'preapprove' | 'session-reference'
 
 /** What the plugin did (or, in shadow mode, would have done). */
 export type DecisionAction =
@@ -22,6 +22,8 @@ export type DecisionAction =
   | 'human'
   | 'degraded'
   | 'skipped'
+  | 'retention-scored'
+  | 'retention-fifo'
 
 /** One durable telemetry record. */
 export interface TelemetryEntry {
