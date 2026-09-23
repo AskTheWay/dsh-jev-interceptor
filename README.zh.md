@@ -72,6 +72,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **注入感知。** 工具参数只进 Jev `state` 数据字段；`instructions` 是固定文案；疑似注入的答案触发*升级*而非压制。（Jev 官方承认可被对抗内容影响——所以本插件的拦截是加速器，永远不是最后防线。）
 - **输入限界。** 参数头尾预览 + 尾部消息摘要——Jev 官方指引就是"代码先过滤，只发问题需要的字段"。
 - **构造级韧性。** 每次尝试墙钟超时、429/529 单次重试、连续失败进冷却（超时也计数）、并发上限、LRU 决策缓存、排队有界的信号量。provider 挂掉的代价是零行为差异，不是你的 harness。
+- **接管行按层禁用。** `jev-session-reference` 行替换了上游 `session-reference` 行；在 Plugins 页单独关掉这一行会落得*没有任何* session-reference 在运行。移除接管请禁用整个 `dsh-jev-interceptor` bundle 层（`setBundleEnabled(false)`），上游行随之恢复。
 - **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`）；`/jev-stats` 按挂点汇总。
 
 以上全部由 **63 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。

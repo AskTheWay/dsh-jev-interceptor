@@ -151,6 +151,8 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
     readonly taskChars: number
   } | undefined
   private readonly scoreCache = new Map<string, ReadonlyMap<number, number>>()
+  /** Captured row-level reference cap (base-class config is private). */
+  private readonly referenceLimit: number
 
   /**
    * @param ctx - plugin context.
@@ -158,43 +160,53 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
    */
   constructor(ctx: Context, config: Config) {
     super(ctx, config)
+    this.referenceLimit = config.maxReferences ?? 3
     if (config.sessionReferenceEnabled === true) {
-      const telemetry = new Telemetry(
-        config.telemetryDir && config.telemetryDir.length > 0
-          ? config.telemetryDir
-          : dshHomePath('plugins', 'dsh-jev-interceptor'),
-      )
-      const { endpoint, model } = resolveProvider(config)
-      const ref = credentialRef(config.apiKeyEnv ?? 'TYPESAFE_API_KEY')
-      const resolveKey = async (): Promise<string | undefined> => {
-        const credentials = ctx.get('credentials')
-        if (credentials !== undefined) {
-          const hit = await credentials.resolve(ref)
-          if (hit !== undefined && hit.value.length > 0) return hit.value
+      // Provider misconfiguration must degrade to passthrough, not fail the
+      // row: with the upstream row disabled by this bundle, a load failure
+      // would leave the profile with NO session-reference at all.
+      try {
+        const telemetry = new Telemetry(
+          config.telemetryDir && config.telemetryDir.length > 0
+            ? config.telemetryDir
+            : dshHomePath('plugins', 'dsh-jev-interceptor'),
+        )
+        const { endpoint, model } = resolveProvider(config)
+        const ref = credentialRef(config.apiKeyEnv ?? 'TYPESAFE_API_KEY')
+        const resolveKey = async (): Promise<string | undefined> => {
+          const credentials = ctx.get('credentials')
+          if (credentials !== undefined) {
+            const hit = await credentials.resolve(ref)
+            if (hit !== undefined && hit.value.length > 0) return hit.value
+            return undefined
+          }
+          const ambient = launchEnvironmentOf(ctx).get(ref)
+          if (ambient !== undefined && ambient.value.length > 0) return ambient.value
           return undefined
         }
-        const ambient = launchEnvironmentOf(ctx).get(ref)
-        if (ambient !== undefined && ambient.value.length > 0) return ambient.value
-        return undefined
-      }
-      this.scoring = {
-        mode: config.mode ?? 'shadow',
-        jev: new JevClient({
-          endpoint,
-          model,
-          timeoutMs: config.timeoutMs ?? 2500,
-          cooldownMs: config.cooldownMs ?? 60_000,
-          failureThreshold: config.failureThreshold ?? 3,
-          maxConcurrency: config.maxConcurrency ?? 4,
-          cacheSize: config.cacheSize ?? 512,
-          resolveKey,
+        this.scoring = {
+          mode: config.mode ?? 'shadow',
+          jev: new JevClient({
+            endpoint,
+            model,
+            timeoutMs: config.timeoutMs ?? 2500,
+            cooldownMs: config.cooldownMs ?? 60_000,
+            failureThreshold: config.failureThreshold ?? 3,
+            maxConcurrency: config.maxConcurrency ?? 4,
+            cacheSize: config.cacheSize ?? 512,
+            resolveKey,
+            telemetry,
+            logger: ctx.logger,
+          }),
           telemetry,
-          logger: ctx.logger,
-        }),
-        telemetry,
-        maxScored: config.maxScored ?? 40,
-        previewChars: config.previewChars ?? 300,
-        taskChars: config.taskChars ?? 500,
+          maxScored: config.maxScored ?? 40,
+          previewChars: config.previewChars ?? 300,
+          taskChars: config.taskChars ?? 500,
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(
+          `dsh-jev-interceptor: session-reference scoring disabled by invalid provider configuration (${error instanceof Error ? error.message : String(error)}); rendering stays upstream passthrough`,
+        )
       }
     }
 
@@ -239,20 +251,35 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
     references: readonly SessionReferenceInput[],
     signal: AbortSignal | undefined,
   ): Promise<void> {
-    if (this.scoring === undefined) return
+    const scoring = this.scoring
+    if (scoring === undefined) return
     if (signal?.aborted === true) return
     const task = content
       .flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : [])
       .join('\n')
-      .slice(0, this.scoring.taskChars)
+      .slice(0, scoring.taskChars)
+    // Mirror the upstream precheck before any I/O: over-limit references are
+    // doomed to SESSION_REFERENCE_TOO_MANY in super.prepare, so spending
+    // reads and Jev calls on them would be pure waste.
     const seen = new Set<string>()
+    const unique: SessionReferenceInput[] = []
     for (const reference of references) {
       if (typeof reference.sessionId !== 'string') continue
       if (reference.sessionId === agent.id || seen.has(reference.sessionId)) continue
       seen.add(reference.sessionId)
+      unique.push(reference)
+    }
+    if (unique.length === 0 || unique.length > this.referenceLimit) return
+    // Scores are per-turn: this pass's task defines them, so earlier turns'
+    // entries must not survive into a render that this pass might fail to
+    // re-score (a degraded pass leaves the cache empty, per the contract).
+    this.scoreCache.clear()
+    // References are independent; score them in parallel (the in-flight cap
+    // already bounds Jev concurrency at maxConcurrency).
+    await Promise.all(unique.map(async (reference) => {
       const snapshot = await this.ctx.sessionQuery.readSurface(reference.sessionId)
       await this.scoreSnapshot(reference.sessionId, reference.label ?? reference.sessionId, task, snapshot, signal)
-    }
+    }))
   }
 
   /** One Jev fan-out over the droppable messages of one referenced session. */
@@ -291,15 +318,26 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
       questions,
       ...(signal === undefined ? {} : { signal }),
     })
-    if (result === null) return
-    const scores = new Map<number, number>()
-    for (const index of indices) {
-      const answer = result.answers[`msg_${index}`]
-      if (answer === undefined || answer.type !== 'score') continue
-      // Four levels land in [0, 3]; normalize into the [0, 1] keep-score space.
-      scores.set(index, Math.min(1, Math.max(0, answer.score / (VALUE_LEVELS.length - 1))))
+    if (result === null) {
+      // A degraded scoring attempt must not leave an earlier task's entry in
+      // place for this observation: "no scores" is the only safe state.
+      this.scoreCache.delete(cacheKey(sessionId, snapshot))
+      return
     }
-    if (scores.size === 0) return
+    const scores = messageScores(result.answers, indices, VALUE_LEVELS.length - 1)
+    if (scores === undefined) {
+      scoring.telemetry.record({
+        ts: new Date().toISOString(),
+        tag: 'session-reference',
+        mode: scoring.mode,
+        sessionId,
+        action: 'degraded',
+        detail: 'answer-shape-mismatch',
+        latencyMs: result.latencyMs,
+      })
+      this.scoreCache.delete(cacheKey(sessionId, snapshot))
+      return
+    }
     if (this.scoreCache.size >= SCORE_CACHE_LIMIT) {
       const oldest = this.scoreCache.keys().next()
       if (oldest.done !== true) this.scoreCache.delete(oldest.value)
@@ -352,19 +390,30 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
     if (this.scoring === undefined) return
     const fifo = retainScoredSession(source.snapshot, source.input.label, maxReferenceBytes, null)
     if (fifo === undefined) return
-    const keptScored = new Set(scored.data.conversation.map(item => `${item.role}\0${item.text}`))
-    const keptFifo = new Set(fifo.data.conversation.map(item => `${item.role}\0${item.text}`))
+    // Multisets, not sets: two identical messages ("ok" twice) must count
+    // twice, or the comparison under-reports drops on duplicate text.
+    const multiset = (items: readonly { role: string; text: string }[]): Map<string, number> => {
+      const counts = new Map<string, number>()
+      for (const item of items) {
+        const key = `${item.role}\0${item.text}`
+        counts.set(key, (counts.get(key) ?? 0) + 1)
+      }
+      return counts
+    }
+    const keptScored = multiset(scored.data.conversation)
+    const keptFifo = multiset(fifo.data.conversation)
+    const remainingFifo = new Map(keptFifo)
     let overlapDropped = 0
     let scoredOnlyDropped = 0
     let fifoOnlyDropped = 0
-    for (const item of projectConversation(source.snapshot)) {
-      const key = `${item.role}\0${item.text}`
-      const inScored = keptScored.has(key)
-      const inFifo = keptFifo.has(key)
-      if (!inScored && !inFifo) overlapDropped += 1
-      else if (!inScored) scoredOnlyDropped += 1
-      else if (!inFifo) fifoOnlyDropped += 1
+    for (const [key, scoredCount] of keptScored) {
+      const fifoCount = remainingFifo.get(key) ?? 0
+      const shared = Math.min(scoredCount, fifoCount)
+      scoredOnlyDropped += Math.max(0, fifoCount - shared)
+      fifoOnlyDropped += Math.max(0, scoredCount - shared)
+      remainingFifo.set(key, fifoCount - shared)
     }
+    for (const count of remainingFifo.values()) overlapDropped += count
     void scores
     this.scoring.telemetry.record({
       ts: new Date().toISOString(),
@@ -379,7 +428,36 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
   }
 }
 
-/** Cache key for one referenced session observation. */
+/**
+ * Extract keep-scores for exactly the requested indices — all or nothing.
+ * @param answers - validated provider answers.
+ * @param indices - the original projection indices that were asked about.
+ * @param maxLevel - the highest score-question level (levels land in [0, maxLevel]).
+ * @returns normalized scores in [0, 1] per index, or `undefined` when any
+ *   answer is missing or not a score — a partial set must never drive retention.
+ */
+export function messageScores(
+  answers: Readonly<Record<string, { type: string }>>,
+  indices: readonly number[],
+  maxLevel: number,
+): Map<number, number> | undefined {
+  const scores = new Map<number, number>()
+  for (const index of indices) {
+    const answer = answers[`msg_${index}`]
+    if (answer === undefined || answer.type !== 'score') return undefined
+    const level = (answer as { score?: unknown }).score
+    if (typeof level !== 'number' || !Number.isFinite(level)) return undefined
+    scores.set(index, Math.min(1, Math.max(0, level / maxLevel)))
+  }
+  return scores
+}
+
+/**
+ * Cache key for one referenced session observation. The cache is cleared at
+ * the start of every scoring pass, so entries never outlive the turn that
+ * produced them; two concurrent same-session references inside one message
+ * batch share whichever scores land last — a documented, bounded limitation.
+ */
 function cacheKey(sessionId: string, snapshot: SessionSurfaceSnapshot): string {
   return `${sessionId}\0${snapshot.capturedThroughSeq ?? 'null'}`
 }

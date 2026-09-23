@@ -180,7 +180,6 @@ describe('retainScoredSession — scored mode', () => {
       { role: 'user', text: 'C: ERROR evidence, keep me' },       // original 2, score 1.0
       { role: 'assistant', text: 'D: newest' },                   // newest, protected
     ])
-    const roomy = retainScoredSession(snap, 'l', 100_000, null)
     // Budget that forces exactly two whole-message drops: the size of the
     // conversation minus its two oldest items, minus a little slack.
     const afterTwoDrops = retainScoredSession(snapshot([

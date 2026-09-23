@@ -1,6 +1,6 @@
 {
   "name": "dsh-jev-interceptor",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Millisecond System-1 judgement for every tool call in DeepSeek Harness: Jev-powered risk classification and evidence-gated auto-approval, fail-closed by construction.",
   "type": "module",
   "main": "lib/index.js",
