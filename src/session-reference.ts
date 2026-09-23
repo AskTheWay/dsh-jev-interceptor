@@ -123,10 +123,10 @@ export const Config: z<Config> = z.object({
 
 /** The four ordered value levels every scored message is judged against. */
 const VALUE_LEVELS = [
-  'noise: greetings, boilerplate, or one-off operations already superseded',
+  'noise: greetings, chit-chat, or logs whose content is fully superseded',
   'background: context that helps but is not required',
   'relevant: materially affects understanding the task',
-  'critical: key decisions, error evidence, or unresolved threads',
+  'critical: error evidence, unresolved threads, or decisions and fixes that shaped the current code (they stay valuable after execution)',
 ] as const
 
 /** Highest score-cache entries retained (one per referenced session per step). */
