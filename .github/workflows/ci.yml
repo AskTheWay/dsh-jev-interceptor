@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack sanity (shipped artifacts)
+        run: npm pack --dry-run
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No tarballs or build output committed
+        run: |
+          test -z "$(git ls-files '*.tgz')" || { echo 'tarball committed'; exit 1; }
+          test -z "$(git ls-files 'lib/*')" || { echo 'build output committed'; exit 1; }
+      - name: Files end with exactly one trailing newline
+        run: |
+          node -e '
+            const { execSync } = require("child_process");
+            const fs = require("fs");
+            const files = execSync("git ls-files").toString().split("\n").filter(Boolean)
+              .filter(f => /\.(md|ts|mts|cts|yml|yaml|mjs|cjs|json)$/.test(f) && f !== "package-lock.json");
+            const bad = files.filter(f => {
+              const s = fs.readFileSync(f, "utf8");
+              return s.length > 0 && (!s.endsWith("\n") || s.endsWith("\n\n"));
+            });
+            if (bad.length > 0) {
+              console.error("trailing-newline violations:\n  " + bad.join("\n  "));
+              process.exit(1);
+            }
+            console.log(files.length + " files checked, all clean");
+          '
