@@ -1,5 +1,6 @@
 # dsh-jev-interceptor
 
+[![CI](https://github.com/AskTheWay/dsh-jev-interceptor/actions/workflows/ci.yml/badge.svg)](https://github.com/AskTheWay/dsh-jev-interceptor/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-jev-interceptor.svg)](https://www.npmjs.com/package/dsh-jev-interceptor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node >= 20.3](https://img.shields.io/badge/node-%3E%3D20.3-green.svg)]()
