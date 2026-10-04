@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionSurfaceSnapshot } from '@deepseek-ai/dsh-session-query'
 import {
+  cjkRatio,
   previewAt,
   projectConversation,
   retainScoredSession,
@@ -230,5 +231,53 @@ describe('projection helpers', () => {
     const projected = projectConversation(snap)
     expect(previewAt(projected, 0, 300).length).toBe(300)
     expect(previewAt(projected, 5, 300)).toBe('')
+  })
+})
+
+describe('protection band (CJK variance mitigation)', () => {
+  it('never drops a protected message while lower-scored droppables remain', () => {
+    const snap = snapshot([
+      { role: 'user', text: 'A: filler '.repeat(6) },            // 0.2
+      { role: 'user', text: 'B: protected decision, keep me' },  // 0.7 (protected at 0.6)
+      { role: 'user', text: 'C: more filler '.repeat(6) },       // 0.1
+      { role: 'assistant', text: 'D: newest' },                  // newest
+    ])
+    const roomy = retainScoredSession(snap, 'l', 100_000, null)
+    const budget = sizeOf(roomy!) - 120
+    const scores = new Map([[0, 0.2], [1, 0.7], [2, 0.1]])
+    const scored = retainScoredSession(snap, 'l', budget, scores, { protectAbove: 0.6 })
+    expect(scored).toBeDefined()
+    const kept = scored!.data.conversation.map(item => item.text)
+    expect(kept.some(text => text.includes('protected decision'))).toBe(true)
+    // Both fillers went first despite A being older than B.
+    expect(kept.some(text => text.includes('A: filler'))).toBe(false)
+    expect(kept.some(text => text.includes('C: more filler'))).toBe(false)
+    expect(sizeOf(scored!)).toBeLessThanOrEqual(budget)
+  })
+
+  it('still honors the budget when every droppable is protected', () => {
+    const snap = snapshot([
+      { role: 'user', text: 'A: semi-valuable '.repeat(8) },
+      { role: 'user', text: 'B: semi-valuable '.repeat(8) },
+      { role: 'assistant', text: 'D: newest' },
+    ])
+    const roomy = retainScoredSession(snap, 'l', 100_000, null)
+    const budget = sizeOf(roomy!) - 100
+    const scores = new Map([[0, 0.8], [1, 0.8]])
+    const scored = retainScoredSession(snap, 'l', budget, scores, { protectAbove: 0.6 })
+    expect(scored).toBeDefined()
+    expect(sizeOf(scored!)).toBeLessThanOrEqual(budget)
+    expect(scored!.stats.omittedMessages).toBeGreaterThan(0)
+  })
+})
+
+describe('cjkRatio', () => {
+  it('measures CJK share of a text sample', () => {
+    expect(cjkRatio('hello world')).toBe(0)
+    expect(cjkRatio('')).toBe(0)
+    expect(cjkRatio('你好世界')).toBe(1)
+    const mixed = cjkRatio('fix 登录页 bug')
+    expect(mixed).toBeGreaterThan(0)
+    expect(mixed).toBeLessThan(1)
   })
 })
