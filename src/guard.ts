@@ -24,6 +24,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import type { PreToolDecision, ToolErrorInfo, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { decideGuard, type GuardAction, type GuardThresholds } from './matrix.js'
+import type { LiveSettings } from './config.js'
 import type { JevClient } from './jev.js'
 import { choice, noul, type ChoiceAnswer, type JevAnswers, type JevQuestion, type NoulAnswer } from './types.js'
 import { canonicalArguments, digestRecent, headTailPreview } from './text.js'
@@ -86,7 +87,8 @@ export class PendingAsks {
 
 /** Resolved configuration and services the guard consumes. */
 export interface GuardDeps {
-  readonly mode: 'shadow' | 'enforce'
+  /** Live settings read once per event: runtime toggles take effect immediately. */
+  readonly live: () => LiveSettings
   readonly readOnlyTools: ReadonlySet<string>
   readonly excludeTools: ReadonlySet<string>
   readonly thresholds: GuardThresholds
@@ -188,16 +190,18 @@ export function createGuardListener(
   deps: GuardDeps,
 ): (exec: ToolExecution, next: () => Promise<PreToolDecision>) => Promise<PreToolDecision> {
   return async (exec, next) => {
+    const live = deps.live()
+    if (!live.enabled) return next()
     let action: GuardAction | undefined
     try {
-      action = await evaluateGuard(deps, exec)
+      action = await evaluateGuard(deps, live, exec)
       // evaluateGuard returns undefined when the call should simply delegate.
     } catch {
       // Our own failure must degrade to stock behavior; next() errors are not ours to swallow.
       action = undefined
     }
     if (action === undefined || action.kind === 'delegate') return next()
-    if (deps.mode === 'shadow') return next()
+    if (live.mode === 'shadow') return next()
     if (action.kind === 'ask') {
       // evaluateGuard already recorded the bounded preview for the pre-approval question.
       return { kind: 'ask', reason: action.reason }
@@ -210,7 +214,7 @@ export function createGuardListener(
  * Run every guard stage that must not swallow `next()` failures. Returns
  * `undefined` for plain delegation (short-circuits, degraded calls).
  */
-async function evaluateGuard(deps: GuardDeps, exec: ToolExecution): Promise<GuardAction | undefined> {
+async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExecution): Promise<GuardAction | undefined> {
   if (exec.agent === undefined) return undefined
   // The outer run_code transport is excluded (its inner calls are classified); mirrors auto-review.
   if (exec.parent === undefined && exec.name === RUN_CODE_NAME) return undefined
@@ -231,7 +235,7 @@ async function evaluateGuard(deps: GuardDeps, exec: ToolExecution): Promise<Guar
 
   const answers = await deps.jev.classify({
     tag: 'guard',
-    mode: deps.mode,
+    mode: live.mode,
     tool: exec.name,
     sessionId: session.id,
     state,
@@ -244,7 +248,7 @@ async function evaluateGuard(deps: GuardDeps, exec: ToolExecution): Promise<Guar
     deps.telemetry.record({
       ts: new Date().toISOString(),
       tag: 'guard',
-      mode: deps.mode,
+      mode: live.mode,
       tool: exec.name,
       sessionId: session.id,
       action: 'degraded',
@@ -257,7 +261,7 @@ async function evaluateGuard(deps: GuardDeps, exec: ToolExecution): Promise<Guar
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'guard',
-    mode: deps.mode,
+    mode: live.mode,
     tool: exec.name,
     sessionId: session.id,
     model: answers.model,

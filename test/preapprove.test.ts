@@ -9,6 +9,7 @@ import { PendingAsks } from '../src/guard.js'
 import type { ClassifyResult, JevClient } from '../src/jev.js'
 import { Telemetry } from '../src/telemetry.js'
 import type { PreapproveThresholds } from '../src/matrix.js'
+import type { LiveSettings } from '../src/config.js'
 
 function fakeRequest(overrides: Partial<ApprovalRequestEvent> = {}): ApprovalRequestEvent {
   return {
@@ -42,7 +43,7 @@ function approveResult(overrides: Partial<ClassifyResult> = {}): ClassifyResult 
   }
 }
 
-async function makeDeps(overrides: Partial<PreapproveDeps> & { classify?: () => Promise<ClassifyResult | null> } = {}): Promise<PreapproveDeps & { readonly calls: number }> {
+async function makeDeps(overrides: Partial<Omit<PreapproveDeps, 'live'>> & { live?: () => LiveSettings; classify?: () => Promise<ClassifyResult | null> } = {}): Promise<PreapproveDeps & { readonly calls: number }> {
   const { classify, ...rest } = overrides
   const counter = { calls: 0 }
   const stub = {
@@ -51,8 +52,9 @@ async function makeDeps(overrides: Partial<PreapproveDeps> & { classify?: () => 
       return approveResult()
     }),
   } as unknown as JevClient
+  const live: LiveSettings = { enabled: true, mode: 'enforce' }
   return {
-    mode: 'enforce',
+    live: () => ({ ...live }),
     allowlist: new Set(['bash']),
     thresholds: {
       autoApproveMin: 0.85,
@@ -151,7 +153,7 @@ describe('createPreapproveListener', () => {
   })
 
   it('never approves in shadow mode', async () => {
-    const deps = await makeDeps({ mode: 'shadow' })
+    const deps = await makeDeps({ live: () => ({ enabled: true, mode: 'shadow' }) })
     deps.pendingAsks.set('session-1', 'call-1', { tool: 'bash', argsPreview: '{"command":"npm test"}' })
     const listener = createPreapproveListener(deps)
     expect(await listener(fakeRequest(), nextHuman)).toBe('unavailable')

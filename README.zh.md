@@ -57,6 +57,15 @@ dsh plugin --profile <name> add dsh-jev-interceptor
     provider: typesafe      # 或 'openrouter'（今天就能用，无需候补）| 'custom'
 ```
 
+**无需改 YAML。** 装好后在聊天框里控制一切——命令持久化到 profile、下一个工具调用即生效、无需重启：
+
+```
+/jev-on                 # 启用（默认 shadow 模式——只记录，不执行）
+/jev-stats              # 看它怎么判，含完整概率分布
+/jev-mode enforce       # 数字满意后升级
+/jev-off                # 回到原生行为
+```
+
 正常使用你的 agent。shadow 模式下每个决策（含完整概率分布）都落入遥测；`/jev-stats` 汇总：
 
 ```

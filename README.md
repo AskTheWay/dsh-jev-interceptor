@@ -57,6 +57,15 @@ dsh plugin --profile <name> add dsh-jev-interceptor
     provider: typesafe      # or 'openrouter' (works today, no waitlist) | 'custom'
 ```
 
+**No YAML needed.** Once installed, control everything from the chat box — commands persist to the profile and take effect on the next tool call, no reload:
+
+```
+/jev-on                 # enable (starts in shadow mode — records, never acts)
+/jev-stats              # watch what it decides, with full probability distributions
+/jev-mode enforce       # promote once the numbers look right
+/jev-off                # back to stock behavior
+```
+
 Use your agent normally. In shadow mode every decision lands in telemetry with its full probability distribution; `/jev-stats` summarizes:
 
 ```

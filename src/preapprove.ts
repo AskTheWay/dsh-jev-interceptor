@@ -23,6 +23,7 @@
 import type {} from '@deepseek-ai/dsh-agent'
 import type { ApprovalOutcome, ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { decidePreapprove, type PreapproveThresholds, type PreapproveVerdict } from './matrix.js'
+import type { LiveSettings } from './config.js'
 import type { JevClient } from './jev.js'
 import { noul, type JevAnswers, type JevQuestion, type NoulAnswer } from './types.js'
 import { digestRecent } from './text.js'
@@ -31,7 +32,8 @@ import type { PendingAsks } from './guard.js'
 
 /** Resolved configuration and services the pre-approver consumes. */
 export interface PreapproveDeps {
-  readonly mode: 'shadow' | 'enforce'
+  /** Live settings read once per event: runtime toggles take effect immediately. */
+  readonly live: () => LiveSettings
   readonly allowlist: ReadonlySet<string>
   readonly thresholds: PreapproveThresholds
   readonly recentMessages: number
@@ -88,19 +90,21 @@ export function createPreapproveListener(
   deps: PreapproveDeps,
 ): (req: ApprovalRequestEvent, next: () => Promise<ApprovalOutcome>) => Promise<ApprovalOutcome> {
   return async (req, next) => {
+    const live = deps.live()
+    if (!live.enabled) return next()
     // Our guard's escalation is a request FOR the human; auto-approving it would defeat the guard.
     if (req.reason !== undefined && req.reason.startsWith('jev-guard:')) return next()
     if (!deps.allowlist.has(req.toolName)) return next()
 
     let verdict: PreapproveVerdict | undefined
     try {
-      verdict = await evaluatePreapprove(deps, req)
+      verdict = await evaluatePreapprove(deps, live, req)
     } catch {
       // Our own failure must land on the human answerer; next() errors are not ours to swallow.
       verdict = undefined
     }
     if (verdict === undefined) return next()
-    if (deps.mode === 'enforce' && verdict.kind === 'auto-approve') return 'allowed-once'
+    if (live.mode === 'enforce' && verdict.kind === 'auto-approve') return 'allowed-once'
     return next()
   }
 }
@@ -112,6 +116,7 @@ export function createPreapproveListener(
  */
 async function evaluatePreapprove(
   deps: PreapproveDeps,
+  live: LiveSettings,
   req: ApprovalRequestEvent,
 ): Promise<PreapproveVerdict | undefined> {
   const session = req.agent.session
@@ -131,7 +136,7 @@ async function evaluatePreapprove(
 
   const result = await deps.jev.classify({
     tag: 'preapprove',
-    mode: deps.mode,
+    mode: live.mode,
     tool: req.toolName,
     sessionId: session.id,
     state,
@@ -144,7 +149,7 @@ async function evaluatePreapprove(
     deps.telemetry.record({
       ts: new Date().toISOString(),
       tag: 'preapprove',
-      mode: deps.mode,
+      mode: live.mode,
       tool: req.toolName,
       sessionId: session.id,
       action: 'degraded',
@@ -157,7 +162,7 @@ async function evaluatePreapprove(
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'preapprove',
-    mode: deps.mode,
+    mode: live.mode,
     tool: req.toolName,
     sessionId: session.id,
     model: result.model,
