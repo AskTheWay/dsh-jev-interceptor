@@ -126,6 +126,10 @@ function droppableIndices(retained: readonly ProjectedItem[]): number[] {
  * @param maxBytes - maximum UTF-8 bytes for the serialized data object.
  * @param scores - value score per ORIGINAL projection index in `[0, 1]`
  *   (higher = keep); `null` selects the exact upstream FIFO policy.
+ * @param options - optional protection band: a droppable message scoring at
+ *   or above `protectAbove` is never dropped while any droppable message
+ *   below it remains — mid-band CJK scores vary more, so CJK-heavy snapshots
+ *   widen the band (pass a LOWER threshold to protect MORE).
  * @returns full projected data, retained preview and stats, or `undefined`
  *   when fixed data cannot fit.
  */
@@ -134,6 +138,7 @@ export function retainScoredSession(
   label: string,
   maxBytes: number,
   scores: ReadonlyMap<number, number> | null,
+  options?: { readonly protectAbove?: number },
 ): RetainedSession | undefined {
   const original = projectConversation(snapshot)
   const retained = original.map(item => ({ ...item }))
@@ -161,6 +166,10 @@ export function retainScoredSession(
     if (droppable.length === 0) break
     let dropIndex = droppable[0]
     if (scores !== null) {
+      // Protection band: never sacrifice a protected message while any
+      // lower-scored droppable remains; when everything left is protected
+      // the band is exhausted and lowest-score still wins (budget wins).
+      const protectAbove = options?.protectAbove
       let bestScore = Number.POSITIVE_INFINITY
       for (const index of droppable) {
         const item = retained[index]
@@ -169,9 +178,24 @@ export function retainScoredSession(
         // Unsourced indices score as neutral; the oldest-first tiebreak keeps
         // behavior FIFO-equivalent among them.
         const value = score === undefined ? 0.5 : score
+        if (protectAbove !== undefined && value >= protectAbove) continue
         if (value < bestScore) {
           bestScore = value
           dropIndex = index
+        }
+      }
+      if (bestScore === Number.POSITIVE_INFINITY) {
+        // All droppable messages are protected: fall back to the plain
+        // lowest-score pick so the byte budget is still honored.
+        for (const index of droppable) {
+          const item = retained[index]
+          if (item === undefined) continue
+          const score = scores.get(item.originalIndex)
+          const value = score === undefined ? 0.5 : score
+          if (value < bestScore) {
+            bestScore = value
+            dropIndex = index
+          }
         }
       }
     }
@@ -297,3 +321,20 @@ export function previewAt(projected: readonly ProjectedItem[], index: number, ma
 
 /** The projected item shape this module works with, for external builders. */
 export type { ProjectedItem }
+
+/**
+ * Fraction of CJK code points in one text sample, in `[0, 1]`.
+ * @param text - the sample to measure.
+ * @returns the CJK ratio; 0 for empty input.
+ */
+export function cjkRatio(text: string): number {
+  if (text.length === 0) return 0
+  let cjk = 0
+  for (const char of text) {
+    const code = char.codePointAt(0)
+    if (code === undefined) continue
+    if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)
+      || (code >= 0x3000 && code <= 0x303f) || (code >= 0xff00 && code <= 0xffef)) cjk += 1
+  }
+  return cjk / text.length
+}

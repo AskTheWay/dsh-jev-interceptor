@@ -36,6 +36,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import {
+  cjkRatio,
   previewAt,
   projectConversation,
   retainScoredSession,
@@ -254,10 +255,33 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
     const scoring = this.scoring
     if (scoring === undefined) return
     if (signal?.aborted === true) return
-    const task = content
+    // Task-anchor enrichment: scores are task-relative, and a bare mention
+    // ("看看这个") anchors on nothing — executed decisions then read as
+    // superseded noise. Anchor on the citing message PLUS the citing
+    // session's recent human instructions, so "how it was fixed" survives
+    // even a one-line mention.
+    const citing = content
       .flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : [])
       .join('\n')
-      .slice(0, scoring.taskChars)
+    const recentInstructions = agent.session.deriveMessages()
+      .filter(message => message.role === 'user' && message.source.kind === 'user')
+      .slice(-3)
+      .map(message => message.content
+        .flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : [])
+        .join(' '))
+      .filter(text => text.length > 0 && text !== citing)
+    const citingPart = citing.slice(0, Math.ceil(scoring.taskChars * 0.6))
+    let instructionBudget = scoring.taskChars - citingPart.length
+    const instructionPart: string[] = []
+    for (let i = recentInstructions.length - 1; i >= 0 && instructionBudget > 0; i -= 1) {
+      const slice = (recentInstructions[i] ?? '').slice(0, instructionBudget)
+      if (slice.length === 0) continue
+      instructionPart.unshift(slice)
+      instructionBudget -= slice.length + 1
+    }
+    const task = instructionPart.length > 0
+      ? `${citingPart}\n[recent task context]\n${instructionPart.join('\n')}`
+      : citingPart
     // Mirror the upstream precheck before any I/O: over-limit references are
     // doomed to SESSION_REFERENCE_TOO_MANY in super.prepare, so spending
     // reads and Jev calls on them would be pure waste.
@@ -359,8 +383,16 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
         rendered.push(...upstream([source], maxReferenceBytes))
         continue
       }
-      // The scored selection (drop policy driven by value scores).
-      const scored = retainScoredSession(source.snapshot, source.input.label, maxReferenceBytes, scores)
+      // The scored selection (drop policy driven by value scores). CJK-heavy
+      // snapshots widen the protection band: mid-band scores vary more in
+      // CJK (measured), so protect strictly-above 0.5 instead of the Latin
+      // default 0.6 — fewer ambiguous messages sacrificed to the budget.
+      const projected = projectConversation(source.snapshot)
+      const cjkShare = cjkRatio(projected.map(item => item.text).join(''))
+      const protectAbove = cjkShare >= 0.3
+        ? 0.5
+        : 0.6
+      const scored = retainScoredSession(source.snapshot, source.input.label, maxReferenceBytes, scores, { protectAbove })
       if (scored === undefined) {
         // Scoring cannot resize past what FIFO could; upstream raises the same error.
         rendered.push(...upstream([source], maxReferenceBytes))
