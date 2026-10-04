@@ -8,6 +8,7 @@ import { createGuardListener, PendingAsks, type GuardDeps } from '../src/guard.j
 import type { JevClient, ClassifyResult } from '../src/jev.js'
 import { Telemetry } from '../src/telemetry.js'
 import type { GuardThresholds } from '../src/matrix.js'
+import type { LiveSettings } from '../src/config.js'
 
 function fakeExec(overrides: Partial<ToolExecution> = {}): ToolExecution {
   const callId = 'call-1' as ToolCallId
@@ -46,11 +47,12 @@ function fakeResult(overrides: Partial<ClassifyResult> = {}): ClassifyResult {
   }
 }
 
-async function makeDeps(overrides: Partial<GuardDeps> & { classify?: () => Promise<ClassifyResult | null> } = {}): Promise<GuardDeps> {
+async function makeDeps(overrides: Partial<Omit<GuardDeps, 'live'>> & { live?: () => LiveSettings; classify?: () => Promise<ClassifyResult | null> } = {}): Promise<GuardDeps> {
   const { classify, ...rest } = overrides
   const stub = { classify: classify ?? (async () => fakeResult()) } as unknown as JevClient
+  const live: LiveSettings = { enabled: true, mode: 'enforce' }
   return {
-    mode: 'enforce',
+    live: () => ({ ...live }),
     readOnlyTools: new Set(['read', 'grep']),
     excludeTools: new Set(),
     thresholds: {
@@ -150,7 +152,7 @@ describe('createGuardListener', () => {
 
   it('never enforces in shadow mode', async () => {
     const listener = createGuardListener(await makeDeps({
-      mode: 'shadow',
+      live: () => ({ enabled: true, mode: 'shadow' }),
       classify: async () => fakeResult({
         answers: {
           risk: { type: 'choice', choice: 'high', probabilities: { high: 0.95 }, confidence: 0.95 },
@@ -161,5 +163,44 @@ describe('createGuardListener', () => {
       }),
     }))
     expect(await listener(fakeExec(), nextAllow)).toEqual({ kind: 'allow' })
+  })
+
+  it('delegates everything while disabled, spending no Jev calls', async () => {
+    let calls = 0
+    const live: LiveSettings = { enabled: false, mode: 'enforce' }
+    const listener = createGuardListener(await makeDeps({
+      live: () => ({ ...live }),
+      classify: async () => { calls += 1; return fakeResult({
+        answers: {
+          risk: { type: 'choice', choice: 'high', probabilities: { high: 0.95 }, confidence: 0.95 },
+          irreversible: { type: 'noul', noul: 0.9 },
+          matches_task: { type: 'noul', noul: 0.5 },
+          injection_suspect: { type: 'noul', noul: 0.01 },
+        },
+      }) },
+    }))
+    // Even a would-be deny stays stock behavior while disabled.
+    expect(await listener(fakeExec(), nextAllow)).toEqual({ kind: 'allow' })
+    expect(calls).toBe(0)
+  })
+
+  it('runtime toggles apply without remounting: disabled → deny after /jev-on', async () => {
+    const live: LiveSettings = { enabled: false, mode: 'enforce' }
+    const denyWorthy = () => fakeResult({
+      answers: {
+        risk: { type: 'choice', choice: 'high', probabilities: { high: 0.9 }, confidence: 0.9 },
+        irreversible: { type: 'noul', noul: 0.8 },
+        matches_task: { type: 'noul', noul: 0.5 },
+        injection_suspect: { type: 'noul', noul: 0.01 },
+      },
+    })
+    const listener = createGuardListener(await makeDeps({
+      live: () => ({ ...live }),
+      classify: async () => denyWorthy(),
+    }))
+    expect(await listener(fakeExec(), nextAllow)).toEqual({ kind: 'allow' })
+    live.enabled = true
+    const decision = await listener(fakeExec(), nextAllow)
+    expect(decision.kind).toBe('deny')
   })
 })

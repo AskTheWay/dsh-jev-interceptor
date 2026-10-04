@@ -261,3 +261,27 @@ export function resolveEndpoint(config: Config): { endpoint: string; model: stri
     model: config.model ?? preset.model,
   }
 }
+
+/** Profile entry id of the jev-interceptor row: the settings-forms update target. */
+export const SETTINGS_NS = 'jev-interceptor'
+
+/** The runtime-tunable subset of the row config. */
+export interface LiveSettings {
+  /** Master switch; `false` leaves stock behavior untouched. */
+  enabled: boolean
+  /** `shadow` records would-be decisions only; `enforce` acts on them. */
+  mode: 'shadow' | 'enforce'
+}
+
+/**
+ * Extract the live subset from a raw section value (row config or resolved
+ * settings snapshot); anything malformed falls back to inert defaults.
+ * @param value - raw value from config or the settings service.
+ * @returns the safe live settings.
+ */
+export function liveOf(value: { enabled?: boolean; mode?: 'shadow' | 'enforce' } | undefined | null): LiveSettings {
+  return {
+    enabled: value?.enabled === true,
+    mode: value?.mode === 'shadow' || value?.mode === 'enforce' ? value.mode : 'shadow',
+  }
+}

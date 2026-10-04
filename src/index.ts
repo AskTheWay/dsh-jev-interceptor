@@ -22,6 +22,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+// Type-only: registers the 'settings' Context key used by installSection.
+import type {} from '@deepseek-ai/dsh-settings'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 // Type-only: registers the 'permissionPresets' Context key so `ctx.get` below
 // typechecks; the service itself is consumed structurally and the package is
@@ -37,8 +39,18 @@ import type { CommandResult } from '@deepseek-ai/dsh-commands'
  * branded string passes structural validation wherever the field is known.
  */
 const jevStatsDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-stats' as CommandDefinitionIdBrand
+const jevOnDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-on' as CommandDefinitionIdBrand
+const jevOffDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-off' as CommandDefinitionIdBrand
+const jevModeDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-mode' as CommandDefinitionIdBrand
 import type {} from '@deepseek-ai/dsh-user-approval/types'
-import { Config, resolveEndpoint, resolveSettings } from './config.js'
+import {
+  Config,
+  SETTINGS_NS,
+  liveOf,
+  resolveEndpoint,
+  resolveSettings,
+  type LiveSettings,
+} from './config.js'
 import { JevClient } from './jev.js'
 import { Telemetry } from './telemetry.js'
 import { createGuardListener, PendingAsks } from './guard.js'
@@ -74,13 +86,19 @@ export { CooldownGate, Semaphore, LruCache } from './resilience.js'
  * @param config - YAML-validated plugin configuration.
  */
 export function apply(ctx: Context, config: Config): void {
-  // Master opt-out: register nothing at all.
-  if (config.enabled !== true) return
-
   const { endpoint, model } = resolveEndpoint(config)
   const settings = resolveSettings(config)
   const telemetry = new Telemetry(settings.telemetryDir)
   const pendingAsks = new PendingAsks()
+
+  // Live settings: the plugin Config is automatically exposed as an editable
+  // settings form keyed by the profile entry id (SETTINGS_NS) on API
+  // generations with SettingsForms; `/jev-on`-style commands write that form,
+  // which persists into the profile patch and live-reloads this entry. On
+  // generations without the service (or without per-entry update), the row
+  // config stays the whole truth and the commands say so.
+  let liveOverride: LiveSettings | undefined
+  const live = (): LiveSettings => liveOverride ?? liveOf(config)
 
   const ref = credentialRef(settings.apiKeyEnv)
   const resolveKey = async (): Promise<string | undefined> => {
@@ -115,7 +133,6 @@ export function apply(ctx: Context, config: Config): void {
 
   if (settings.guardEnabled) {
     ctx.on('tools/pre-execute', createGuardListener({
-      mode: settings.mode,
       readOnlyTools: settings.readOnlyTools,
       excludeTools: settings.excludeTools,
       thresholds: {
@@ -132,6 +149,7 @@ export function apply(ctx: Context, config: Config): void {
       jev,
       telemetry,
       pendingAsks,
+      live,
       // Resolved per event: a capture here could miss a service that activates later.
       permissionPresets: () => ctx.get('permissionPresets'),
     }))
@@ -139,7 +157,6 @@ export function apply(ctx: Context, config: Config): void {
 
   if (settings.preapproveEnabled) {
     ctx.on('approval/request', createPreapproveListener({
-      mode: settings.mode,
       allowlist: settings.preapproveToolAllowlist,
       thresholds: {
         autoApproveMin: settings.preapproveAutoApproveMin,
@@ -151,7 +168,34 @@ export function apply(ctx: Context, config: Config): void {
       jev,
       telemetry,
       pendingAsks,
+      live,
     }), { prepend: true })
+  }
+
+  const setLive = async (patch: Partial<LiveSettings>): Promise<CommandResult> => {
+    // Apply immediately in-process so behavior flips on the next event even
+    // when persistence (or the reload it triggers) is unavailable.
+    liveOverride = { ...live(), ...patch }
+    const settingsService = ctx.get('settings')
+    if (settingsService !== undefined && typeof settingsService.update === 'function') {
+      try {
+        await settingsService.update(SETTINGS_NS, patch)
+        const now = live()
+        return {
+          kind: 'success',
+          text: `dsh-jev-interceptor: ${now.enabled ? 'enabled' : 'disabled'}, mode ${now.mode}.`
+            + ' Persisted to the profile and effective immediately (the entry live-reloads).',
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(`dsh-jev-interceptor: settings update failed (${error instanceof Error ? error.message : String(error)}); applied in-memory only for this run`)
+      }
+    }
+    const now = live()
+    return {
+      kind: 'success',
+      text: `dsh-jev-interceptor: ${now.enabled ? 'enabled' : 'disabled'}, mode ${now.mode} — applied for this run only.`
+        + ' This profile cannot persist plugin settings; set enabled/mode in the jev-interceptor row of cordis.patch.yml to make it permanent.',
+    }
   }
 
   ctx.inject(['commands'], (commandsCtx) => {
@@ -161,12 +205,38 @@ export function apply(ctx: Context, config: Config): void {
       description: 'Show dsh-jev-interceptor decision statistics',
       handler: async (): Promise<CommandResult> => ({ kind: 'success', text: await telemetry.stats() }),
     })
+    void commandsCtx.commands.register({
+      definitionId: jevOnDefinitionId,
+      name: 'jev-on',
+      description: 'Enable dsh-jev-interceptor (persists, no reload needed)',
+      handler: async (): Promise<CommandResult> => setLive({ enabled: true }),
+    })
+    void commandsCtx.commands.register({
+      definitionId: jevOffDefinitionId,
+      name: 'jev-off',
+      description: 'Disable dsh-jev-interceptor (persists, no reload needed)',
+      handler: async (): Promise<CommandResult> => setLive({ enabled: false }),
+    })
+    void commandsCtx.commands.register({
+      definitionId: jevModeDefinitionId,
+      name: 'jev-mode',
+      description: 'Set dsh-jev-interceptor mode: shadow (record only) or enforce (act)',
+      handler: async (invocation): Promise<CommandResult> => {
+        const arg = invocation.rawInput.trim()
+        if (arg !== 'shadow' && arg !== 'enforce') {
+          return { kind: 'error', text: 'Usage: /jev-mode <shadow|enforce>' }
+        }
+        return setLive({ mode: arg })
+      },
+    })
   })
 
+  const state = live()
   const allowlistNote = settings.preapproveToolAllowlist.size === 0
     ? '; pre-approval allowlist is empty — no call is auto-approved until preapproveToolAllowlist names tools'
     : ''
   ctx.logger.info(
-    `dsh-jev-interceptor: active in ${settings.mode} mode (provider endpoint ${endpoint}, model ${model})${allowlistNote}`,
+    `dsh-jev-interceptor: ${state.enabled ? `active in ${state.mode} mode` : 'registered but disabled'}`
+    + ` (provider endpoint ${endpoint}, model ${model}); /jev-on and /jev-mode control it at runtime${allowlistNote}`,
   )
 }
