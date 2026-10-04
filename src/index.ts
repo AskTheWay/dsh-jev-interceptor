@@ -55,6 +55,7 @@ import { JevClient } from './jev.js'
 import { Telemetry } from './telemetry.js'
 import { createGuardListener, PendingAsks } from './guard.js'
 import { createPreapproveListener } from './preapprove.js'
+import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-jev-interceptor'
@@ -90,6 +91,7 @@ export function apply(ctx: Context, config: Config): void {
   const settings = resolveSettings(config)
   const telemetry = new Telemetry(settings.telemetryDir)
   const pendingAsks = new PendingAsks()
+  const approvalTrace = new ApprovalTrace()
 
   // Live settings: the plugin Config is automatically exposed as an editable
   // settings form keyed by the profile entry id (SETTINGS_NS) on API
@@ -169,8 +171,14 @@ export function apply(ctx: Context, config: Config): void {
       telemetry,
       pendingAsks,
       live,
+      trace: approvalTrace,
     }), { prepend: true })
   }
+
+  // Approval data loop: durable asked/decided audit events correlate with
+  // pre-approval verdicts, so shadow mode accumulates the agreement dataset
+  // (headline: asks Jev would auto-approve but the human rejected).
+  ctx.on('session/event', createApprovalLoopListener({ trace: approvalTrace, telemetry }))
 
   const setLive = async (patch: Partial<LiveSettings>): Promise<CommandResult> => {
     // Apply immediately in-process so behavior flips on the next event even

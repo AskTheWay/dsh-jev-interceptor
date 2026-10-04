@@ -29,6 +29,7 @@ import { noul, type JevAnswers, type JevQuestion, type NoulAnswer } from './type
 import { digestRecent } from './text.js'
 import type { Telemetry } from './telemetry.js'
 import type { PendingAsks } from './guard.js'
+import type { ApprovalTrace } from './approval-loop.js'
 
 /** Resolved configuration and services the pre-approver consumes. */
 export interface PreapproveDeps {
@@ -41,6 +42,8 @@ export interface PreapproveDeps {
   readonly jev: JevClient
   readonly telemetry: Telemetry
   readonly pendingAsks: PendingAsks
+  /** Receives the verdict for the approval data loop; no-op when absent. */
+  readonly trace?: ApprovalTrace
 }
 
 /** The one fan-out every pre-approval asks. */
@@ -103,6 +106,11 @@ export function createPreapproveListener(
       // Our own failure must land on the human answerer; next() errors are not ours to swallow.
       verdict = undefined
     }
+    deps.trace?.noteVerdict(
+      req.agent.session.id,
+      req.callId === undefined ? undefined : String(req.callId),
+      verdict === undefined ? 'not-evaluated' : verdict.kind,
+    )
     if (verdict === undefined) return next()
     if (live.mode === 'enforce' && verdict.kind === 'auto-approve') return 'allowed-once'
     return next()
