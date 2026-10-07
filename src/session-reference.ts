@@ -398,15 +398,19 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
         rendered.push(...upstream([source], maxReferenceBytes))
         continue
       }
+      // The FIFO counterfactual is computed once per source and shared with
+      // the comparison record; when it cannot fit, the comparison is simply
+      // skipped (upstream would raise the same budget error anyway).
+      const fifo = retainScoredSession(source.snapshot, source.input.label, maxReferenceBytes, null)
       if (this.scoring.mode === 'enforce') {
-        this.recordComparison(source, scored, maxReferenceBytes, scores)
+        if (fifo !== undefined) this.recordComparison(source, scored, fifo, scores)
         rendered.push({ ...scored, capturedFormatVersion: source.snapshot.session.version })
         continue
       }
       // Shadow: the real render stays the upstream bytes; the scored selection
       // is only the recorded counterfactual.
       const upstreamRendered = upstream([source], maxReferenceBytes)
-      this.recordComparison(source, scored, maxReferenceBytes, scores)
+      if (fifo !== undefined) this.recordComparison(source, scored, fifo, scores)
       rendered.push(...upstreamRendered)
     }
     return rendered
@@ -416,12 +420,10 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
   private recordComparison(
     source: PreparedSourceLike,
     scored: { data: ReferencedSessionData; stats: ReferenceRetentionStats },
-    maxReferenceBytes: number,
+    fifo: { data: ReferencedSessionData; stats: ReferenceRetentionStats },
     scores: ReadonlyMap<number, number>,
   ): void {
     if (this.scoring === undefined) return
-    const fifo = retainScoredSession(source.snapshot, source.input.label, maxReferenceBytes, null)
-    if (fifo === undefined) return
     // Multisets, not sets: two identical messages ("ok" twice) must count
     // twice, or the comparison under-reports drops on duplicate text.
     const multiset = (items: readonly { role: string; text: string }[]): Map<string, number> => {
