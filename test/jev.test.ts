@@ -108,6 +108,32 @@ describe('JevClient', () => {
     expect(await client.classify(call)).toBeNull()
   })
 
+  it('throttles repeated same-reason degrade telemetry to one row per minute', async () => {
+    const entries: { action: import('../src/telemetry.js').DecisionAction; detail?: string }[] = []
+    const telemetry = { record: (entry: { action: import('../src/telemetry.js').DecisionAction; detail?: string }) => { entries.push(entry) } }
+    let t = 0
+    const client = new JevClient({
+      endpoint: 'https://example.test/decisions',
+      model: 'jev-latest',
+      timeoutMs: 1500,
+      cooldownMs: 60_000,
+      failureThreshold: 3,
+      maxConcurrency: 4,
+      cacheSize: 16,
+      resolveKey: async () => undefined,
+      telemetry: telemetry as never,
+      logger: { warn: () => {} },
+      now: () => t,
+    })
+    // Five no-key calls in the same minute: one telemetry row.
+    for (let i = 0; i < 5; i++) await client.classify(call)
+    expect(entries.filter(entry => entry.action === 'degraded')).toHaveLength(1)
+    // An hour later (clock jumps): the heartbeat row lands again.
+    t = 3_600_000
+    await client.classify(call)
+    expect(entries.filter(entry => entry.action === 'degraded')).toHaveLength(2)
+  })
+
   it('records degraded entries in telemetry', async () => {
     const { client, dir } = await makeClient(async () => new Response('nope', { status: 500 }))
     await client.classify(call)

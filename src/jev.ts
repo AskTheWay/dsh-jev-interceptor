@@ -93,6 +93,13 @@ export class JevClient {
   private readonly gate: CooldownGate
   private readonly semaphore: Semaphore
   private readonly cache: LruCache<string, ClassifyResult>
+  /**
+   * Degrade-telemetry throttle: a session with no key (or an open cooldown)
+   * degrades on EVERY call, which would flood the log with identical rows.
+   * A repeated same-reason degrade is recorded at most once per interval
+   * and on every reason change.
+   */
+  private lastDegrade: { reason: string; at: number } | undefined
 
   /**
    * @param options - endpoints, budgets, key resolution, telemetry, logger.
@@ -120,6 +127,11 @@ export class JevClient {
   async classify(call: ClassifyCall): Promise<ClassifyResult | null> {
     const started = this.now()
     const degrade = (reason: DegradeReason): null => {
+      const previous = this.lastDegrade
+      this.lastDegrade = { reason, at: this.now() }
+      const DEGRADE_REPEAT_MS = 60_000
+      if (previous !== undefined && previous.reason === reason
+        && this.now() - previous.at < DEGRADE_REPEAT_MS) return null
       this.telemetry.record({
         ts: new Date().toISOString(),
         tag: call.tag,
