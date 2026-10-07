@@ -187,7 +187,9 @@ function foldInto(stats: TagStats, entry: TelemetryEntry): void {
   if (entry.cached === true) stats.cached += 1
   if (entry.inputTokens !== undefined) stats.totalInputTokens += entry.inputTokens
   if (entry.costUsd !== undefined) stats.totalCostUsd += entry.costUsd
-  if (entry.latencyMs !== undefined) stats.latencies.push(entry.latencyMs)
+  // Cache hits carry latency 0 by construction; mixing them into percentiles
+  // drags p50 toward zero and hides the real provider latency distribution.
+  if (entry.latencyMs !== undefined && entry.cached !== true) stats.latencies.push(entry.latencyMs)
 }
 
 /** p50/p95 line for a latency sample; `undefined` without samples. */
