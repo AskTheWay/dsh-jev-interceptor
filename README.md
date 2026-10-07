@@ -88,7 +88,7 @@ Happy with the numbers? Flip `mode: enforce`. That's the whole rollout plan — 
 - **Takeover rows disable as a layer.** The `jev-session-reference` row replaces the upstream `session-reference` row; toggling only this row off in the Plugins UI would leave *no* session-reference active. Remove the takeover by disabling the whole `dsh-jev-interceptor` bundle layer (`setBundleEnabled(false)`), which restores the upstream row.
 - **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`); `/jev-stats` aggregates it per hook.
 
-All of this is enforced by **63 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
+All of this is enforced by **77 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
 
 ## Configure
 
@@ -123,7 +123,7 @@ The client speaks the plain `state + questions` wire shape shared by TypeSafe di
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
 npm run typecheck                # src + tests, against real @deepseek-ai types
-npm test                         # vitest, 63 tests, no network
+npm test                         # vitest, 77 tests, no network
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # one real decision against a live provider
 ```
