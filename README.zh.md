@@ -88,7 +88,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **接管行按层禁用。** `jev-session-reference` 行替换了上游 `session-reference` 行；在 Plugins 页单独关掉这一行会落得*没有任何* session-reference 在运行。移除接管请禁用整个 `dsh-jev-interceptor` bundle 层（`setBundleEnabled(false)`），上游行随之恢复。
 - **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`）；`/jev-stats` 按挂点汇总。
 
-以上全部由 **63 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
+以上全部由 **77 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
 
 ## 配置
 
@@ -123,7 +123,7 @@ OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用�
 ```sh
 npm install --legacy-peer-deps   # devDeps 钉在当前一代 dsh API
 npm run typecheck                # src + tests，对真实 @deepseek-ai 类型
-npm test                         # vitest，63 个测试，无需网络
+npm test                         # vitest，77 个测试，无需网络
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # 对真实 provider 跑一次决策
 ```
