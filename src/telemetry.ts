@@ -63,6 +63,8 @@ export interface TagStats {
   totalInputTokens: number
   totalCostUsd: number
   latencies: number[]
+  /** Agreement-bucket counts for the approval-loop tag (others stay empty). */
+  approvalBuckets: Partial<Record<(typeof APPROVAL_BUCKETS)[number], number>>
 }
 
 /** Price used to estimate cost when the provider does not report one (USD per input megatok); Jev published rate. */
@@ -121,6 +123,10 @@ export class Telemetry {
       lines.push(`  input tokens: ${stats.totalInputTokens}  est. cost: $${stats.totalCostUsd.toFixed(6)}`)
       const latency = percentileLine(stats.latencies)
       if (latency !== undefined) lines.push(`  latency: ${latency}`)
+      const bucketEntries = Object.entries(stats.approvalBuckets)
+      if (bucketEntries.length > 0) {
+        lines.push('  agreement: ' + bucketEntries.map(([bucket, n]) => `${bucket}=${n}`).join(' '))
+      }
       lines.push('')
     }
     return lines.join('\n')
@@ -175,6 +181,7 @@ function emptyStats(): TagStats {
     totalInputTokens: 0,
     totalCostUsd: 0,
     latencies: [],
+    approvalBuckets: {},
   }
 }
 
@@ -190,7 +197,25 @@ function foldInto(stats: TagStats, entry: TelemetryEntry): void {
   // Cache hits carry latency 0 by construction; mixing them into percentiles
   // drags p50 toward zero and hides the real provider latency distribution.
   if (entry.latencyMs !== undefined && entry.cached !== true) stats.latencies.push(entry.latencyMs)
+  // Approval-loop buckets ride in `detail`; surface them as first-class
+  // counters so /jev-stats can print a summary line.
+  if (entry.tag === 'approval-loop') {
+    for (const bucket of APPROVAL_BUCKETS) {
+      if (entry.detail?.includes(bucket) === true) {
+        stats.approvalBuckets[bucket] = (stats.approvalBuckets[bucket] ?? 0) + 1
+      }
+    }
+  }
 }
+
+/** Every agreement bucket the approval loop can report. */
+const APPROVAL_BUCKETS = [
+  'would-over-approve',
+  'aligned-approve',
+  'aligned-reject',
+  'friction-human-approved',
+  'neutral',
+] as const
 
 /** p50/p95 line for a latency sample; `undefined` without samples. */
 function percentileLine(latencies: readonly number[]): string | undefined {
