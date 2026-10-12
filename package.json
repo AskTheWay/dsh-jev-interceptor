@@ -23,7 +23,8 @@
     "docs",
     "README.md",
     "README.zh.md",
-    "LICENSE"
+    "LICENSE",
+    "lib/client.js"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -49,6 +50,10 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
     }
   },
   "peerDependencies": {
