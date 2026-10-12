@@ -1,6 +1,6 @@
 {
   "name": "dsh-jev-interceptor",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Millisecond System-1 judgement for every tool call in DeepSeek Harness: Jev-powered risk classification and evidence-gated auto-approval, fail-closed by construction.",
   "type": "module",
   "main": "lib/index.js",
@@ -27,7 +27,7 @@
     "lib/client.js"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-client.mjs",
     "clean": "node -e \"fs.rmSync('lib', {force: true, recursive: true})\" --input-type=module 2>/dev/null || rimraf lib",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
