@@ -102,10 +102,11 @@ export class Telemetry {
   }
 
   /**
-   * Render per-hook aggregates for the `/jev-stats` command.
+   * Render per-hook aggregates for the `/jev-stats` command as a visual
+   * chat-friendly report with bar charts and status indicators.
    * @param tailLines - when provided, aggregate only the trailing N lines
    *   instead of the whole log (avoids reading 20 MB on every command).
-   * @returns a human-readable plain-text report.
+   * @returns a human-readable plain-text report with ASCII visualizations.
    */
   async stats(tailLines?: number): Promise<string> {
     await this.ready().catch(() => undefined)
@@ -118,21 +119,53 @@ export class Telemetry {
       foldInto(stats, entry)
       tags.set(entry.tag, stats)
     }
-    if (tags.size === 0) return 'dsh-jev-interceptor：暂无决策记录。'
-    const lines: string[] = ['dsh-jev-interceptor 决策统计：', '']
+    if (tags.size === 0) {
+      return '```\n⚡ dsh-jev-interceptor\n\n  暂无决策记录\n\n  运行 /jev-on 启用插件后再查看\n```'
+    }
+    const lines: string[] = ['```']
+    lines.push('⚡ dsh-jev-interceptor 决策统计')
+    lines.push('━'.repeat(44))
+    lines.push('')
     for (const [tag, stats] of tags) {
-      lines.push(`[${tag}] 调用 ${stats.calls} 次  降级 ${stats.degraded}  缓存命中 ${stats.cached}`)
-      const actions = [...stats.byAction.entries()].map(([action, n]) => `${action}=${n}`).join(' ')
-      lines.push(`  动作分布: ${actions.length > 0 ? actions : '无'}`)
-      lines.push(`  输入 token: ${stats.totalInputTokens}  预计成本: $${stats.totalCostUsd.toFixed(6)}`)
+      const tagLabel = TAG_LABELS[tag] ?? tag
+      lines.push(`📋 ${tagLabel}`)
+      lines.push(`   调用 ${stats.calls} 次 │ 降级 ${stats.degraded} │ 缓存 ${stats.cached}`)
+      // 动作分布横条图
+      const actions = [...stats.byAction.entries()].sort((a, b) => b[1] - a[1])
+      if (actions.length > 0) {
+        lines.push('')
+        for (const [action, n] of actions) {
+          const label = ACTION_LABELS[action] ?? action
+          const barStr = bar(n, stats.calls)
+          lines.push(`   ${padEnd(label, 8)} ${barStr} ${n}`)
+        }
+      }
+      // 延迟
       const latency = percentileLine(stats.latencies)
-      if (latency !== undefined) lines.push(`  延迟: ${latency}`)
+      if (latency !== undefined) {
+        lines.push(`   延迟 ${latency}`)
+      }
+      // 成本
+      if (stats.totalCostUsd > 0) {
+        lines.push(`   💰 成本 $${stats.totalCostUsd.toFixed(6)} (${stats.totalInputTokens} tokens)`)
+      }
+      // 一致率（approval-loop 专属）
       const bucketEntries = Object.entries(stats.approvalBuckets)
       if (bucketEntries.length > 0) {
-        lines.push('  一致率: ' + bucketEntries.map(([bucket, n]) => `${bucket}=${n}`).join(' '))
+        lines.push('')
+        lines.push('   🤝 一致率')
+        for (const [bucket, n] of bucketEntries) {
+          const label = BUCKET_LABELS[bucket] ?? bucket
+          const icon = bucket === 'would-over-approve' ? (n === 0 ? '✅' : '⚠️') : ''
+          const bucketBar = bar(n, stats.calls)
+          lines.push(`   ${padEnd(label, 10)} ${bucketBar} ${n} ${icon}`)
+        }
       }
       lines.push('')
     }
+    lines.push('━'.repeat(44))
+    lines.push('  详细: /jev-stats --all │ 状态: /jev-status')
+    lines.push('```')
     return lines.join('\n')
   }
 
@@ -272,4 +305,68 @@ function percentileLine(latencies: readonly number[]): string | undefined {
 export function estimateCostUsd(inputTokens: number | undefined): number | undefined {
   if (inputTokens === undefined) return undefined
   return (inputTokens / 1_000_000) * JEV_USD_PER_MTOK
+}
+
+// ── ASCII 可视化辅助 ─────────────────────────────────────────────────────
+
+/** Tag 中文标签 */
+const TAG_LABELS: Readonly<Record<string, string>> = {
+  guard: '守门人（风险分类）',
+  preapprove: '预批（自动审批）',
+  'session-reference': '会话保留打分',
+  'approval-loop': '审批一致率',
+}
+
+/** Action 中文标签 */
+const ACTION_LABELS: Readonly<Record<string, string>> = {
+  delegate: '放行',
+  ask: '转人工',
+  deny: '拒绝',
+  'auto-approve': '自动批',
+  human: '人工',
+  degraded: '降级',
+  skipped: '跳过',
+  'retention-scored': '打分保留',
+  'retention-fifo': 'FIFO保留',
+  agreement: '一致率',
+}
+
+/** Agreement bucket 中文标签 */
+const BUCKET_LABELS: Readonly<Record<string, string>> = {
+  'would-over-approve': '误批风险',
+  'aligned-approve': '一致批',
+  'aligned-reject': '一致拒',
+  'friction-human-approved': '多余人工',
+  neutral: '中性',
+}
+
+/**
+ * Render a proportional bar for a count within a total.
+ * @param n - the count to visualize.
+ * @param total - the maximum for proportion.
+ * @param width - character width of the bar (default 20).
+ * @returns a string like `████████░░░░░░░░░░░░`.
+ */
+function bar(n: number, total: number, width = 20): string {
+  if (total <= 0 || n <= 0) return '░'.repeat(width)
+  const filled = Math.max(1, Math.round((n / total) * width))
+  return '█'.repeat(filled) + '░'.repeat(width - filled)
+}
+
+/**
+ * Pad a string to a fixed display width, accounting for CJK double-width
+ * characters (each CJK char occupies two monospace columns).
+ * @param text - the string to pad.
+ * @param targetWidth - the desired display width.
+ * @returns the padded string.
+ */
+function padEnd(text: string, targetWidth: number): string {
+  let displayWidth = 0
+  for (const char of text) {
+    const code = char.codePointAt(0)
+    if (code !== undefined && code >= 0x2e80 && code <= 0x9fff) displayWidth += 2
+    else displayWidth += 1
+  }
+  const padding = Math.max(0, targetWidth - displayWidth)
+  return text + ' '.repeat(padding)
 }

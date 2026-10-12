@@ -30,7 +30,7 @@ describe('Telemetry.stats', () => {
       // Ten cache hits at latency 0 would drag p50 to zero if counted.
       ...Array.from({ length: 10 }, () => ({ ...base, action: 'delegate' as const, latencyMs: 0, cached: true })),
     ])
-    expect(text).toContain('缓存命中 10')
+    expect(text).toContain('缓存 10')
     // p50 over [400, 500, 600] is 500; if cache zeros leaked in it would be 0.
     expect(text).toContain('p50 500ms')
     expect(text).not.toContain('p50 0ms')
@@ -43,9 +43,9 @@ describe('Telemetry.stats', () => {
       { ...base, tag: 'approval-loop' as const, action: 'agreement' as const, detail: 'jev=human human=allowed-once friction-human-approved' },
       { ...base, tag: 'approval-loop' as const, action: 'agreement' as const, detail: 'jev=auto-approve human=allowed-once aligned-approve' },
     ])
-    expect(text).toContain('would-over-approve=2')
-    expect(text).toContain('friction-human-approved=1')
-    expect(text).toContain('aligned-approve=1')
+    expect(text).toContain('误批风险')
+    expect(text).toContain('多余人工')
+    expect(text).toContain('一致批')
   })
 
   it('prints no agreement line for tags without buckets', async () => {
