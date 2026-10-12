@@ -79,6 +79,17 @@ export interface Config {
   preapproveIrreversibleMax?: number
   /** Injection suspicion at/above which auto-approval is blocked (default 0.5). */
   preapproveInjectionSuspectMax?: number
+
+  /** Image-offload pre-planning master switch; default off (irreversible on disk). */
+  imageOffloadEnabled?: boolean
+  /** Token-pressure ratio [0,1] to trigger pre-planning (default 0.75). */
+  imageOffloadPressureThreshold?: number
+  /** Minimum unoffloaded candidate images to score (default 3). */
+  imageOffloadMinCandidates?: number
+  /** A message is sacrificial only when its score answer ≤ this (default 0.33). */
+  imageOffloadSacrificeScoreMax?: number
+  /** Sacrificial probability floor [0,1] (default 0.8). */
+  imageOffloadSacrificeProbMin?: number
 }
 
 /** Read-only dsh tool names (verified against the dsh tool registry) that never need classification. */
@@ -153,6 +164,12 @@ export const Config: z<Config> = z.object({
   preapproveAutoApproveMin: z.number().min(0).max(1).default(DEFAULTS.preapproveAutoApproveMin),
   preapproveIrreversibleMax: z.number().min(0).max(1).default(DEFAULTS.preapproveIrreversibleMax),
   preapproveInjectionSuspectMax: z.number().min(0).max(1).default(DEFAULTS.preapproveInjectionSuspectMax),
+
+  imageOffloadEnabled: z.boolean().default(false),
+  imageOffloadPressureThreshold: z.number().min(0).max(1).default(0.75),
+  imageOffloadMinCandidates: z.number().step(1).min(1).default(3),
+  imageOffloadSacrificeScoreMax: z.number().min(0).max(1).default(0.33),
+  imageOffloadSacrificeProbMin: z.number().min(0).max(1).default(0.8),
 })
 
 /** Fully-defaulted settings, the one resolved shape the rest of the plugin consumes. */

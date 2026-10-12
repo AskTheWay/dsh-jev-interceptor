@@ -57,6 +57,7 @@ import { Telemetry } from './telemetry.js'
 import { createGuardListener, PendingAsks } from './guard.js'
 import { createPreapproveListener } from './preapprove.js'
 import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
+import { createImageOffloadListener } from './image-offload.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-jev-interceptor'
@@ -174,6 +175,22 @@ export function apply(ctx: Context, config: Config): void {
       live,
       trace: approvalTrace,
     }), { prepend: true })
+  }
+
+  // Image-offload pre-planning: fills the gap dsh's README admits —
+  // "nothing plans an offload before dispatch". Opt-in (default off) because
+  // image/offload events are irreversible on disk; only high-confidence
+  // sacrificial images are offloaded before the request dispatches.
+  if (config.imageOffloadEnabled === true) {
+    ctx.on('agent/pre-step', createImageOffloadListener({
+      live,
+      pressureThreshold: config.imageOffloadPressureThreshold ?? 0.75,
+      minCandidates: config.imageOffloadMinCandidates ?? 3,
+      sacrificeScoreMax: config.imageOffloadSacrificeScoreMax ?? 0.33,
+      sacrificeProbMin: config.imageOffloadSacrificeProbMin ?? 0.8,
+      jev,
+      telemetry,
+    }))
   }
 
   // Approval data loop: durable asked/decided audit events correlate with
