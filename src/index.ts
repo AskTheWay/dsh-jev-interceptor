@@ -42,6 +42,7 @@ const jevStatsDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-
 const jevOnDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-on' as CommandDefinitionIdBrand
 const jevOffDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-off' as CommandDefinitionIdBrand
 const jevModeDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-mode' as CommandDefinitionIdBrand
+const jevStatusDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-status' as CommandDefinitionIdBrand
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import {
   Config,
@@ -178,7 +179,7 @@ export function apply(ctx: Context, config: Config): void {
   // Approval data loop: durable asked/decided audit events correlate with
   // pre-approval verdicts, so shadow mode accumulates the agreement dataset
   // (headline: asks Jev would auto-approve but the human rejected).
-  ctx.on('session/event', createApprovalLoopListener({ trace: approvalTrace, telemetry }))
+  ctx.on('session/event', createApprovalLoopListener({ trace: approvalTrace, telemetry, live }))
 
   const setLive = async (patch: Partial<LiveSettings>): Promise<CommandResult> => {
     // Apply immediately in-process so behavior flips on the next event even
@@ -191,8 +192,8 @@ export function apply(ctx: Context, config: Config): void {
         const now = live()
         return {
           kind: 'success',
-          text: `dsh-jev-interceptor: ${now.enabled ? 'enabled' : 'disabled'}, mode ${now.mode}.`
-            + ' Persisted to the profile and effective immediately (the entry live-reloads).',
+          text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode}。`
+            + ' 已持久化到 profile，下一个工具调用即生效（无需重启）。',
         }
       } catch (error: unknown) {
         ctx.logger.warn(`dsh-jev-interceptor: settings update failed (${error instanceof Error ? error.message : String(error)}); applied in-memory only for this run`)
@@ -201,8 +202,8 @@ export function apply(ctx: Context, config: Config): void {
     const now = live()
     return {
       kind: 'success',
-      text: `dsh-jev-interceptor: ${now.enabled ? 'enabled' : 'disabled'}, mode ${now.mode} — applied for this run only.`
-        + ' This profile cannot persist plugin settings; set enabled/mode in the jev-interceptor row of cordis.patch.yml to make it permanent.',
+      text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode} —— 仅本次运行生效。`
+        + ' 当前 profile 无法持久化插件设置；要永久生效请在 cordis.patch.yml 的 jev-interceptor 行设置 enabled/mode。',
     }
   }
 
@@ -210,29 +211,50 @@ export function apply(ctx: Context, config: Config): void {
     void commandsCtx.commands.register({
       definitionId: jevStatsDefinitionId,
       name: 'jev-stats',
-      description: 'Show dsh-jev-interceptor decision statistics',
-      handler: async (): Promise<CommandResult> => ({ kind: 'success', text: await telemetry.stats() }),
+      description: '查看 Jev 决策统计（默认最近 200 条，--all 全量）',
+      handler: async (invocation): Promise<CommandResult> => {
+        const full = invocation.rawInput.includes('--all')
+        return { kind: 'success', text: await telemetry.stats(full ? undefined : 200) }
+      },
+    })
+    void commandsCtx.commands.register({
+      definitionId: jevStatusDefinitionId,
+      name: 'jev-status',
+      description: '查看 Jev 插件当前状态',
+      handler: async (): Promise<CommandResult> => {
+        const s = live()
+        const lines = [
+          `dsh-jev-interceptor 状态：`,
+          `  运行状态: ${s.enabled ? '✅ 已启用' : '⏸️ 已停用（所有决策走原生行为）'}`,
+          `  模式: ${s.mode}${s.mode === 'shadow' ? '（只记录，不执行）' : '（执行决策）'}`,
+          `  Provider: ${config.provider ?? 'typesafe'} (${endpoint})`,
+          `  模型: ${model}`,
+          `  守门人: ${settings.guardEnabled ? '开启' : '关闭'}`,
+          `  预批: ${settings.preapproveEnabled ? '开启' : '关闭'}${settings.preapproveToolAllowlist.size === 0 ? '（白名单为空，不会自动批任何工具）' : ''}`,
+        ]
+        return { kind: 'success', text: lines.join('\n') }
+      },
     })
     void commandsCtx.commands.register({
       definitionId: jevOnDefinitionId,
       name: 'jev-on',
-      description: 'Enable dsh-jev-interceptor (persists, no reload needed)',
+      description: '启用 Jev 插件（持久化，无需重启）',
       handler: async (): Promise<CommandResult> => setLive({ enabled: true }),
     })
     void commandsCtx.commands.register({
       definitionId: jevOffDefinitionId,
       name: 'jev-off',
-      description: 'Disable dsh-jev-interceptor (persists, no reload needed)',
+      description: '停用 Jev 插件（持久化，无需重启）',
       handler: async (): Promise<CommandResult> => setLive({ enabled: false }),
     })
     void commandsCtx.commands.register({
       definitionId: jevModeDefinitionId,
       name: 'jev-mode',
-      description: 'Set dsh-jev-interceptor mode: shadow (record only) or enforce (act)',
+      description: '设置模式：shadow（只记录）或 enforce（执行）',
       handler: async (invocation): Promise<CommandResult> => {
         const arg = invocation.rawInput.trim()
         if (arg !== 'shadow' && arg !== 'enforce') {
-          return { kind: 'error', text: 'Usage: /jev-mode <shadow|enforce>' }
+          return { kind: 'error', text: '用法：/jev-mode <shadow|enforce>\n  shadow  = 只记录决策，不执行\n  enforce = 执行决策（deny/ask/自动批）' }
         }
         return setLive({ mode: arg })
       },
@@ -241,10 +263,10 @@ export function apply(ctx: Context, config: Config): void {
 
   const state = live()
   const allowlistNote = settings.preapproveToolAllowlist.size === 0
-    ? '; pre-approval allowlist is empty — no call is auto-approved until preapproveToolAllowlist names tools'
+    ? '；预批白名单为空——在 preapproveToolAllowlist 里点名工具前不会自动批任何调用'
     : ''
   ctx.logger.info(
-    `dsh-jev-interceptor: ${state.enabled ? `active in ${state.mode} mode` : 'registered but disabled'}`
-    + ` (provider endpoint ${endpoint}, model ${model}); /jev-on and /jev-mode control it at runtime${allowlistNote}`,
+    `dsh-jev-interceptor：${state.enabled ? `运行中（${state.mode} 模式）` : '已注册但停用'}`
+    + `（provider ${endpoint}，模型 ${model}）；/jev-on 和 /jev-mode 可运行时切换${allowlistNote}`,
   )
 }

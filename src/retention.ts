@@ -323,7 +323,9 @@ export function previewAt(projected: readonly ProjectedItem[], index: number, ma
 export type { ProjectedItem }
 
 /**
- * Fraction of CJK code points in one text sample, in `[0, 1]`.
+ * Fraction of CJK code points in one text sample, in `[0, 1]`. Covers Chinese
+ * (Han + Extension A + CJK punctuation + fullwidth forms), Japanese (Hiragana
+ * + Katakana), and Korean (Hangul syllables + Jamo).
  * @param text - the sample to measure.
  * @returns the CJK ratio; 0 for empty input.
  */
@@ -333,8 +335,14 @@ export function cjkRatio(text: string): number {
   for (const char of text) {
     const code = char.codePointAt(0)
     if (code === undefined) continue
-    if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)
-      || (code >= 0x3000 && code <= 0x303f) || (code >= 0xff00 && code <= 0xffef)) cjk += 1
+    if ((code >= 0x4e00 && code <= 0x9fff)          // CJK Unified Ideographs
+      || (code >= 0x3400 && code <= 0x4dbf)         // CJK Extension A
+      || (code >= 0x3000 && code <= 0x303f)         // CJK Symbols & Punctuation
+      || (code >= 0xff00 && code <= 0xffef)         // Halfwidth/Fullwidth Forms
+      || (code >= 0x3040 && code <= 0x30ff)         // Hiragana + Katakana
+      || (code >= 0x31f0 && code <= 0x31ff)         // Katakana Phonetic Extensions
+      || (code >= 0xac00 && code <= 0xd7af)         // Hangul Syllables
+      || (code >= 0x1100 && code <= 0x11ff)) cjk += 1 // Hangul Jamo
   }
   return cjk / text.length
 }

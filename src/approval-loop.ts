@@ -17,6 +17,7 @@
  */
 
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { LiveSettings } from './config.js'
 import type { Telemetry } from './telemetry.js'
 
 /** What the pre-approver concluded for one ask. */
@@ -102,7 +103,7 @@ export class ApprovalTrace {
  * @returns the listener.
  */
 export function createApprovalLoopListener(
-  deps: { readonly trace: ApprovalTrace; readonly telemetry: Telemetry },
+  deps: { readonly trace: ApprovalTrace; readonly telemetry: Telemetry; readonly live: () => LiveSettings },
 ): (session: Session, event: SessionEvent) => void {
   return (session, event) => {
     if (event.type === 'approval/asked') {
@@ -118,10 +119,12 @@ export function createApprovalLoopListener(
     if (event.type === 'approval/decided') {
       const agreement = deps.trace.onDecided(String(event.data.id), event.data.outcome)
       if (agreement === undefined) return
+      // The mode here distinguishes shadow (would-have) from enforce
+      // (actually-happened) agreement records — their safety semantics differ.
       deps.telemetry.record({
         ts: new Date().toISOString(),
         tag: 'approval-loop',
-        mode: 'shadow',
+        mode: deps.live().mode,
         tool: agreement.tool,
         sessionId: agreement.sessionId,
         action: 'agreement',

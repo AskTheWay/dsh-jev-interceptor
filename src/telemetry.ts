@@ -7,7 +7,7 @@
  * @module dsh-jev-interceptor/telemetry
  */
 
-import { appendFile, mkdir, readFile, stat, rename } from 'node:fs/promises'
+import { appendFile, mkdir, open, readFile, stat, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 /** Where a decision came from. */
@@ -103,33 +103,72 @@ export class Telemetry {
 
   /**
    * Render per-hook aggregates for the `/jev-stats` command.
+   * @param tailLines - when provided, aggregate only the trailing N lines
+   *   instead of the whole log (avoids reading 20 MB on every command).
    * @returns a human-readable plain-text report.
    */
-  async stats(): Promise<string> {
+  async stats(tailLines?: number): Promise<string> {
     await this.ready().catch(() => undefined)
-    const entries = await this.readEntries()
+    const entries = tailLines === undefined
+      ? await this.readEntries()
+      : await this.readTailEntries(tailLines)
     const tags = new Map<string, TagStats>()
     for (const entry of entries) {
       const stats = tags.get(entry.tag) ?? emptyStats()
       foldInto(stats, entry)
       tags.set(entry.tag, stats)
     }
-    if (tags.size === 0) return 'dsh-jev-interceptor: no decisions recorded yet.'
-    const lines: string[] = ['dsh-jev-interceptor decisions (from telemetry log):', '']
+    if (tags.size === 0) return 'dsh-jev-interceptor：暂无决策记录。'
+    const lines: string[] = ['dsh-jev-interceptor 决策统计：', '']
     for (const [tag, stats] of tags) {
-      lines.push(`[${tag}] calls: ${stats.calls}  degraded: ${stats.degraded}  cached: ${stats.cached}`)
+      lines.push(`[${tag}] 调用 ${stats.calls} 次  降级 ${stats.degraded}  缓存命中 ${stats.cached}`)
       const actions = [...stats.byAction.entries()].map(([action, n]) => `${action}=${n}`).join(' ')
-      lines.push(`  actions: ${actions.length > 0 ? actions : 'none'}`)
-      lines.push(`  input tokens: ${stats.totalInputTokens}  est. cost: $${stats.totalCostUsd.toFixed(6)}`)
+      lines.push(`  动作分布: ${actions.length > 0 ? actions : '无'}`)
+      lines.push(`  输入 token: ${stats.totalInputTokens}  预计成本: $${stats.totalCostUsd.toFixed(6)}`)
       const latency = percentileLine(stats.latencies)
-      if (latency !== undefined) lines.push(`  latency: ${latency}`)
+      if (latency !== undefined) lines.push(`  延迟: ${latency}`)
       const bucketEntries = Object.entries(stats.approvalBuckets)
       if (bucketEntries.length > 0) {
-        lines.push('  agreement: ' + bucketEntries.map(([bucket, n]) => `${bucket}=${n}`).join(' '))
+        lines.push('  一致率: ' + bucketEntries.map(([bucket, n]) => `${bucket}=${n}`).join(' '))
       }
       lines.push('')
     }
     return lines.join('\n')
+  }
+
+  /**
+   * Read only the trailing N entries without parsing the whole file: stat the
+   * size, read the last chunk, and split. A torn head line from the chunk
+   * boundary reads as absent.
+   */
+  private async readTailEntries(n: number): Promise<TelemetryEntry[]> {
+    try {
+      const info = await stat(this.file)
+      // Assume ~1 KB per line as an upper bound; read at most that many bytes.
+      const chunkBytes = Math.min(info.size, n * 1024 + 4096)
+      const handle = await open(this.file, 'r')
+      try {
+        const buffer = Buffer.alloc(chunkBytes)
+        const { bytesRead } = await handle.read(buffer, 0, chunkBytes, info.size - chunkBytes)
+        const raw = buffer.subarray(0, bytesRead).toString('utf8')
+        const lines = raw.split('\n').filter(line => line.length > 0)
+        // Drop the first line if it's a torn head (chunk started mid-line).
+        if (chunkBytes < info.size && lines.length > 0) lines.shift()
+        const entries: TelemetryEntry[] = []
+        for (const line of lines) {
+          try {
+            entries.push(JSON.parse(line) as TelemetryEntry)
+          } catch {
+            // Torn or malformed line reads as absent.
+          }
+        }
+        return entries
+      } finally {
+        await handle.close()
+      }
+    } catch {
+      return []
+    }
   }
 
   /**
