@@ -73,7 +73,7 @@ describe('createApprovalLoopListener', () => {
   it('feeds the trace from asked/decided events and writes agreement telemetry', () => {
     const trace = new ApprovalTrace()
     const telemetry = new CapturingTelemetry()
-    const listener = createApprovalLoopListener({ trace, telemetry: telemetry as unknown as Telemetry })
+    const listener = createApprovalLoopListener({ trace, telemetry: telemetry as unknown as Telemetry, live: () => ({ enabled: true, mode: 'enforce' }) })
     const session = fakeSession('s1') as never
 
     listener(session, { type: 'approval/asked', data: { id: 'a1', toolName: 'bash', callId: 'c1' } } as never)
@@ -92,7 +92,7 @@ describe('createApprovalLoopListener', () => {
   it('ignores unrelated session events', () => {
     const trace = new ApprovalTrace()
     const telemetry = new CapturingTelemetry()
-    const listener = createApprovalLoopListener({ trace, telemetry: telemetry as unknown as Telemetry })
+    const listener = createApprovalLoopListener({ trace, telemetry: telemetry as unknown as Telemetry, live: () => ({ enabled: true, mode: 'enforce' }) })
     listener(fakeSession('s1') as never, { type: 'user/message', data: {} } as never)
     listener(fakeSession('s1') as never, { type: 'turn/start', data: { turn: 1 } } as never)
     expect(telemetry.entries.length).toBe(0)
