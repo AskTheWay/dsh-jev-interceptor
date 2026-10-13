@@ -240,16 +240,22 @@ export function apply(ctx: Context, config: Config): void {
       description: '查看 Jev 插件当前状态',
       handler: async (): Promise<CommandResult> => {
         const s = live()
-        const lines = [
-          `dsh-jev-interceptor 状态：`,
-          `  运行状态: ${s.enabled ? '✅ 已启用' : '⏸️ 已停用（所有决策走原生行为）'}`,
-          `  模式: ${s.mode}${s.mode === 'shadow' ? '（只记录，不执行）' : '（执行决策）'}`,
-          `  Provider: ${config.provider ?? 'typesafe'} (${endpoint})`,
-          `  模型: ${model}`,
-          `  守门人: ${settings.guardEnabled ? '开启' : '关闭'}`,
-          `  预批: ${settings.preapproveEnabled ? '开启' : '关闭'}${settings.preapproveToolAllowlist.size === 0 ? '（白名单为空，不会自动批任何工具）' : ''}`,
-        ]
-        return { kind: 'success', text: lines.join('\n') }
+        const text = [
+          '```',
+          '⚡ dsh-jev-interceptor 状态',
+          '━'.repeat(32),
+          `  运行   ${s.enabled ? '✅ 已启用' : '⏸️ 已停用'}`,
+          `  模式   ${s.mode}${s.mode === 'shadow' ? '（只记录）' : '（执行决策）'}`,
+          `  源     ${config.provider ?? 'typesafe'}`,
+          `  模型   ${model}`,
+          `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}`,
+          settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
+          '━'.repeat(32),
+          '  控制: /jev-on /jev-off /jev-mode',
+          '  统计: /jev-stats',
+          '```',
+        ].filter(line => line.length > 0).join('\n')
+        return { kind: 'success', text }
       },
     })
     void commandsCtx.commands.register({
