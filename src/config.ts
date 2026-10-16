@@ -21,15 +21,15 @@ export interface Config {
   enabled?: boolean
   /** `shadow` (default) records would-be decisions only; `enforce` acts on them. */
   mode?: 'shadow' | 'enforce'
-  /** Which Jev entry point to call. */
+  /** Which Jev entry point to call: typesafe (官方) / openrouter / custom. */
   provider?: 'typesafe' | 'openrouter' | 'custom'
-  /** Full decisions endpoint URL; required for `custom`, overrides the preset otherwise. */
+  /** 自定义 endpoint URL（provider 为 custom 时必填）. */
   endpoint?: string
-  /** Model id; defaults to the provider preset (`jev-latest` / `~typesafe/jev-latest`). */
+  /** 模型 ID（默认跟随 provider）. */
   model?: string
-  /** Credential reference (environment-variable name) resolved per request; default `TYPESAFE_API_KEY`. */
+  /** 环境变量名（引用式 key，默认 TYPESAFE_API_KEY）. */
   apiKeyEnv?: string
-  /** The actual API key value; when set via /jev-key, takes precedence over apiKeyEnv. */
+  /** API key 值（/jev-key 写入；优先于环境变量）. */
   apiKey?: string
   /** Wall-clock budget per decision attempt in milliseconds (default 1500). */
   timeoutMs?: number
@@ -140,6 +140,7 @@ export const Config: z<Config> = z.object({
   endpoint: z.string(),
   model: z.string(),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULTS.apiKeyEnv),
+  apiKey: z.string().role('secret').description('API key 值（优先于环境变量）'),
   timeoutMs: z.number().step(1).min(100).default(DEFAULTS.timeoutMs),
   cooldownMs: z.number().step(1).min(1000).default(DEFAULTS.cooldownMs),
   failureThreshold: z.number().step(1).min(1).default(DEFAULTS.failureThreshold),
