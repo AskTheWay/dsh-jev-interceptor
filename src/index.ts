@@ -161,6 +161,8 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   // Panel API: browser-side settings page fetches from these routes.
+  // Wrapped in inject to defer registration until the connection service is available.
+  ctx.inject(['connection'], () => {
   registerJevApi(ctx, {
     getStatus: () => {
       const s = live()
@@ -188,6 +190,7 @@ export function apply(ctx: Context, config: Config): void {
         if (typeof patch['apiKey'] === 'string') configOverride = { ...(configOverride ?? config), apiKey: patch['apiKey'] }
       }
     },
+  })
   })
 
   // Optional seams resolved defensively: the plugin loads in every profile.
