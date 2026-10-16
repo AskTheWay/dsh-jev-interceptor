@@ -43,6 +43,7 @@ const jevOnDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-on'
 const jevOffDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-off' as CommandDefinitionIdBrand
 const jevModeDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-mode' as CommandDefinitionIdBrand
 const jevStatusDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-status' as CommandDefinitionIdBrand
+const jevKeyDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-key' as CommandDefinitionIdBrand
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import {
   Config,
@@ -106,6 +107,8 @@ export function apply(ctx: Context, config: Config): void {
 
   const ref = credentialRef(settings.apiKeyEnv)
   const resolveKey = async (): Promise<string | undefined> => {
+    // Direct config value (set via /jev-key) takes precedence over everything.
+    if (config.apiKey !== undefined && config.apiKey.length > 0) return config.apiKey
     const credentials = ctx.get('credentials')
     if (credentials !== undefined) {
       // The seam owns the whole credential plane when present: a miss does not
@@ -229,6 +232,10 @@ export function apply(ctx: Context, config: Config): void {
       definitionId: jevStatsDefinitionId,
       name: 'jev-stats',
       description: '查看 Jev 决策统计（默认最近 200 条，--all 全量）',
+      // Without an `input` hint a capable client refuses any non-bare line
+      // (`matchEnter` → `!bare` → not a command) and submits `/jev-stats --all`
+      // as an ordinary prompt, so the handler never receives the flag.
+      input: { hint: '[--all]' },
       handler: async (invocation): Promise<CommandResult> => {
         const full = invocation.rawInput.includes('--all')
         return { kind: 'success', text: await telemetry.stats(full ? undefined : 200) }
@@ -243,19 +250,46 @@ export function apply(ctx: Context, config: Config): void {
         const text = [
           '```',
           '⚡ dsh-jev-interceptor 状态',
-          '━'.repeat(32),
           `  运行   ${s.enabled ? '✅ 已启用' : '⏸️ 已停用'}`,
           `  模式   ${s.mode}${s.mode === 'shadow' ? '（只记录）' : '（执行决策）'}`,
           `  源     ${config.provider ?? 'typesafe'}`,
           `  模型   ${model}`,
           `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}`,
+          `  Key    ${config.apiKey !== undefined && config.apiKey.length > 0 ? '✅ 已配置' : (await resolveKey()) !== undefined ? '✅ 环境变量' : '❌ 未配置（运行 /jev-key <key>）'}`,
           settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
-          '━'.repeat(32),
           '  控制: /jev-on /jev-off /jev-mode',
           '  统计: /jev-stats',
           '```',
         ].filter(line => line.length > 0).join('\n')
         return { kind: 'success', text }
+      },
+    })
+    void commandsCtx.commands.register({
+      definitionId: jevKeyDefinitionId,
+      name: 'jev-key',
+      description: '设置 Jev API key（持久化，不需要环境变量）',
+      input: { hint: '<api-key>' },
+      handler: async (invocation): Promise<CommandResult> => {
+        const key = invocation.rawInput.trim()
+        if (key.length < 10) {
+          return { kind: 'error', text: '用法：/jev-key <你的API密钥>（长度需大于 10 个字符）' }
+        }
+        const settingsService = ctx.get('settings')
+        if (settingsService !== undefined && typeof settingsService.update === 'function') {
+          try {
+            await settingsService.update(SETTINGS_NS, { apiKey: key })
+            return {
+              kind: 'success',
+              text: 'dsh-jev-interceptor：API key 已存储 ✅ 持久化到 profile，无需环境变量，重启后仍生效。下一步：/jev-on 启用插件',
+            }
+          } catch (error: unknown) {
+            ctx.logger.warn(`dsh-jev-interceptor: key storage failed (${error instanceof Error ? error.message : String(error)})`)
+          }
+        }
+        return {
+          kind: 'error',
+          text: '当前 profile 无法持久化设置。备选方案：在 cordis.patch.yml 的 jev-interceptor 行加 apiKey: <你的key>',
+        }
       },
     })
     void commandsCtx.commands.register({
@@ -274,6 +308,9 @@ export function apply(ctx: Context, config: Config): void {
       definitionId: jevModeDefinitionId,
       name: 'jev-mode',
       description: '设置模式：shadow（只记录）或 enforce（执行）',
+      // Same reason as jev-stats: only a declared input hint makes the client
+      // admit `/jev-mode enforce` as a command instead of a chat message.
+      input: { hint: 'shadow | enforce' },
       handler: async (invocation): Promise<CommandResult> => {
         const arg = invocation.rawInput.trim()
         if (arg !== 'shadow' && arg !== 'enforce') {

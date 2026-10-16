@@ -29,6 +29,8 @@ export interface Config {
   model?: string
   /** Credential reference (environment-variable name) resolved per request; default `TYPESAFE_API_KEY`. */
   apiKeyEnv?: string
+  /** The actual API key value; when set via /jev-key, takes precedence over apiKeyEnv. */
+  apiKey?: string
   /** Wall-clock budget per decision attempt in milliseconds (default 1500). */
   timeoutMs?: number
   /** Cooldown after consecutive failures in milliseconds (default 60000). */

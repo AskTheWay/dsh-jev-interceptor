@@ -124,7 +124,6 @@ export class Telemetry {
     }
     const lines: string[] = ['```']
     lines.push('⚡ dsh-jev-interceptor 决策统计')
-    lines.push('━'.repeat(44))
     lines.push('')
     for (const [tag, stats] of tags) {
       const tagLabel = TAG_LABELS[tag] ?? tag
