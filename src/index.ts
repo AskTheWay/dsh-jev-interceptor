@@ -96,19 +96,41 @@ export function apply(ctx: Context, config: Config): void {
   const pendingAsks = new PendingAsks()
   const approvalTrace = new ApprovalTrace()
 
-  // Live settings: the plugin Config is automatically exposed as an editable
-  // settings form keyed by the profile entry id (SETTINGS_NS) on API
-  // generations with SettingsForms; `/jev-on`-style commands write that form,
-  // which persists into the profile patch and live-reloads this entry. On
-  // generations without the service (or without per-entry update), the row
-  // config stays the whole truth and the commands say so.
+  // Live settings: the plugin Config is registered with the settings provider
+  // so the Settings → Plugins page renders a form (provider, model, apiKey,
+  // mode, etc.) and /jev-key persists through the user layer. On generations
+  // without the service, the row config stays the whole truth.
   let liveOverride: LiveSettings | undefined
-  const live = (): LiveSettings => liveOverride ?? liveOf(config)
+  let configOverride: Config | undefined
+  const live = (): LiveSettings => liveOverride ?? liveOf(configOverride ?? config)
+
+  // Register our Config schema with the settings provider → the Plugins page
+  // discovers it via describe() and renders the form.
+  ctx.inject(['settings'], (settingsCtx) => {
+    const provider = settingsCtx.get('settings') as unknown as {
+      installSection?: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: {
+        setSource?: (source: unknown) => void
+      }) => void
+    }
+    if (provider !== undefined && typeof provider.installSection === 'function') {
+      provider.installSection(ctx, 'jev-interceptor', Config, config, {
+        setSource: (source) => {
+          // The settings service publishes the resolved value (base + user layer);
+          // adopt it so runtime toggles reflect persisted changes.
+          if (typeof source === 'object' && source !== null) {
+            configOverride = source as Config
+          }
+        },
+      })
+      ctx.logger.info('dsh-jev-interceptor: Settings form registered — configure in Settings → Plugins')
+    }
+  })
 
   const ref = credentialRef(settings.apiKeyEnv)
   const resolveKey = async (): Promise<string | undefined> => {
-    // Direct config value (set via /jev-key) takes precedence over everything.
-    if (config.apiKey !== undefined && config.apiKey.length > 0) return config.apiKey
+    // Direct config value (set via /jev-key or Settings form) takes precedence.
+    const apiKey = (configOverride ?? config).apiKey
+    if (apiKey !== undefined && apiKey.length > 0) return apiKey
     const credentials = ctx.get('credentials')
     if (credentials !== undefined) {
       // The seam owns the whole credential plane when present: a miss does not
