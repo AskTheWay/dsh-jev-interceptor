@@ -1,26 +1,24 @@
 /**
  * Jev Interceptor 主面板：配置 + 状态 + 决策统计。
  *
- * 数据来源：宿主半 /api/jev-interceptor/status 和 /api/jev-interceptor/stats，
- * fetch 后渲染。配置变更通过 /api/jev-interceptor/config PUT 持久化。
+ * 布局跟随 dsh 原生面板风格（全宽、左对齐），不居中。
+ * 所有按钮带加载/错误反馈。
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
-/** 宿主半返回的配置状态。 */
 interface JevStatus {
   enabled: boolean
   mode: 'shadow' | 'enforce'
   provider: string
   model: string
   keyConfigured: boolean
-  keySource: 'config' | 'credentials' | 'env' | 'none'
+  keySource: string
   guardEnabled: boolean
   preapproveEnabled: boolean
 }
 
-/** 宿主半返回的统计摘要（每 tag 一条）。 */
 interface TagSummary {
   tag: string
   calls: number
@@ -36,26 +34,25 @@ interface TagSummary {
 
 type JevPageProps = PropsRuntime<'main'>
 
-const SECTION: React.CSSProperties = {
-  margin: '16px 0', padding: '12px', border: '1px solid rgba(128,128,128,.35)',
-  borderRadius: '8px', background: 'rgba(128,128,128,.06)',
+const S = {
+  page: { padding: '20px 24px' as const },
+  title: { margin: '0 0 16px', fontSize: '18px', fontWeight: 600 as const },
+  card: { margin: '0 0 16px', padding: '14px 16px', border: '1px solid rgba(128,128,128,.25)', borderRadius: '8px', background: 'rgba(128,128,128,.04)' },
+  label: { fontSize: '12px', color: 'rgba(128,128,128,.7)', marginBottom: '6px' },
+  row: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' as const },
+  input: { flex: 1, minWidth: '200px', padding: '8px 12px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.35)', fontSize: '14px', background: 'transparent', color: 'inherit', outline: 'none' },
+  btn: { padding: '8px 18px', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 500 } as React.CSSProperties,
+  statCard: { padding: '10px', borderRadius: '6px', border: '1px solid rgba(128,128,128,.2)', textAlign: 'center' as const },
+  statLabel: { fontSize: '10px', color: 'rgba(128,128,128,.6)' },
+  statValue: { fontSize: '18px', fontWeight: 600, marginTop: '2px' },
+  barRow: { display: 'flex', alignItems: 'center', gap: '6px', margin: '3px 0' },
+  barLabel: { width: '60px', fontSize: '11px', color: 'rgba(128,128,128,.7)', textAlign: 'right' as const },
+  barTrack: { flex: 1, height: '6px', borderRadius: '3px', background: 'rgba(128,128,128,.15)', overflow: 'hidden' },
+  barFill: { height: '100%', borderRadius: '3px', background: 'rgba(99,102,241,.6)' },
+  barValue: { width: '28px', fontSize: '11px', color: 'rgba(128,128,128,.8)' },
+  error: { padding: '8px 12px', borderRadius: '6px', background: 'rgba(239,68,68,.1)', color: '#f87171', fontSize: '12px', margin: '8px 0' },
+  success: { padding: '8px 12px', borderRadius: '6px', background: 'rgba(34,197,94,.1)', color: '#4ade80', fontSize: '12px', margin: '8px 0' },
 }
-const LABEL: React.CSSProperties = { fontSize: '13px', color: 'rgba(128,128,128,.8)', marginBottom: '4px' }
-const INPUT: React.CSSProperties = {
-  width: '100%', padding: '6px 10px', borderRadius: '4px',
-  border: '1px solid rgba(128,128,128,.4)', fontSize: '14px', background: 'transparent',
-  color: 'inherit',
-}
-const BTN: React.CSSProperties = {
-  padding: '6px 16px', borderRadius: '6px', border: 'none', cursor: 'pointer',
-  fontSize: '14px', fontWeight: 500,
-}
-const STAT_CARD: React.CSSProperties = {
-  flex: '1', minWidth: '100px', padding: '10px 12px', borderRadius: '6px',
-  border: '1px solid rgba(128,128,128,.3)', textAlign: 'center',
-}
-const STAT_LABEL: React.CSSProperties = { fontSize: '11px', color: 'rgba(128,128,128,.7)' }
-const STAT_VALUE: React.CSSProperties = { fontSize: '20px', fontWeight: 600, marginTop: '4px' }
 
 const TAG_LABELS: Record<string, string> = {
   guard: '守门人（风险分类）',
@@ -69,208 +66,195 @@ const ACTION_LABELS: Record<string, string> = {
   human: '人工', degraded: '降级', agreement: '一致率',
 }
 
-function Bar({ value, total, label }: { value: number; total: number; label: string }): React.JSX.Element {
-  const width = total > 0 ? Math.round((value / total) * 100) : 0
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', margin: '2px 0' }}>
-      <span style={{ width: '70px', fontSize: '11px', color: 'rgba(128,128,128,.7)', textAlign: 'right' }}>{label}</span>
-      <div style={{ flex: '1', height: '8px', borderRadius: '4px', background: 'rgba(128,128,128,.2)', overflow: 'hidden' }}>
-        <div style={{ width: `${width}%`, height: '100%', borderRadius: '4px', background: 'rgba(99,102,241,.7)' }} />
-      </div>
-      <span style={{ width: '30px', fontSize: '11px', color: 'rgba(128,128,128,.8)' }}>{value}</span>
-    </div>
-  )
+const PROVIDERS = [
+  { id: 'typesafe', label: 'TypeSafe' },
+  { id: 'openrouter', label: 'OpenRouter' },
+  { id: 'custom', label: '自定义' },
+]
+
+async function apiPut(patch: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/jev-interceptor/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (res.ok) return { ok: true }
+    const body = await res.text().catch(() => '')
+    return { ok: false, error: `HTTP ${String(res.status)}${body.length > 0 ? `: ${body}` : ''}` }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [status, setStatus] = useState<JevStatus | null>(null)
   const [stats, setStats] = useState<TagSummary[]>([])
   const [apiKey, setApiKey] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState('')
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [loadError, setLoadError] = useState('')
 
   const refresh = useCallback(async () => {
     try {
-      const [statusRes, statsRes] = await Promise.all([
+      setLoadError('')
+      const [sr, tr] = await Promise.all([
         fetch('/api/jev-interceptor/status', { headers: { 'cache-control': 'no-store' } }),
         fetch('/api/jev-interceptor/stats', { headers: { 'cache-control': 'no-store' } }),
       ])
-      if (statusRes.ok) setStatus(await statusRes.json() as JevStatus)
-      if (statsRes.ok) {
-        const raw = await statsRes.json()
+      if (sr.ok) setStatus(await sr.json() as JevStatus)
+      else if (sr.status === 401) setLoadError('需要登录（刷新页面）')
+      else setLoadError(`状态加载失败: HTTP ${String(sr.status)}`)
+      if (tr.ok) {
+        const raw = await tr.json()
         setStats(Array.isArray(raw) ? raw as TagSummary[] : [])
       }
-    } catch {
-      // Network error; panel degrades to last-known data
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
     }
   }, [])
 
   useEffect(() => { void refresh() }, [refresh])
 
+  const doAction = useCallback(async (label: string, patch: Record<string, unknown>) => {
+    setBusy(label)
+    setMsg(null)
+    const r = await apiPut(patch)
+    setBusy('')
+    if (r.ok) { setMsg({ kind: 'ok', text: '✅ 已更新' }); void refresh() }
+    else setMsg({ kind: 'err', text: r.error ?? '更新失败' })
+  }, [refresh])
+
   const saveKey = useCallback(async () => {
-    if (apiKey.trim().length < 10) { setMessage('Key 长度需大于 10 个字符'); return }
-    setSaving(true)
-    setMessage('')
-    try {
-      const res = await fetch('/api/jev-interceptor/config', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ apiKey: apiKey.trim() }),
-      })
-      if (res.ok) { setMessage('✅ 已保存'); setApiKey(''); void refresh() }
-      else setMessage(`保存失败: HTTP ${String(res.status)}`)
-    } catch { setMessage('保存失败：网络错误') } finally { setSaving(false) }
-  }, [apiKey, refresh])
-
-  const toggleMode = useCallback(async () => {
-    if (status === null) return
-    const next = status.mode === 'shadow' ? 'enforce' : 'shadow'
-    try {
-      const res = await fetch('/api/jev-interceptor/config', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ mode: next }),
-      })
-      if (res.ok) { void refresh() }
-    } catch { /* degrade */ }
-  }, [status, refresh])
-
-  const toggleEnabled = useCallback(async () => {
-    if (status === null) return
-    const next = !status.enabled
-    try {
-      const res = await fetch('/api/jev-interceptor/config', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ enabled: next }),
-      })
-      if (res.ok) { void refresh() }
-    } catch { /* degrade */ }
-  }, [status, refresh])
+    if (apiKey.trim().length < 10) { setMsg({ kind: 'err', text: 'Key 长度需大于 10 个字符' }); return }
+    await doAction('saveKey', { apiKey: apiKey.trim() })
+    setApiKey('')
+  }, [apiKey, doAction])
 
   return (
-    <div style={{ padding: '16px', maxWidth: '640px', margin: '0 auto' }}>
-      <h2 style={{ margin: '0 0 16px', fontSize: '18px' }}>⚡ Jev Interceptor</h2>
+    <div style={S.page}>
+      <h2 style={S.title}>⚡ Jev Interceptor</h2>
 
-      {/* 状态卡 */}
-      {status !== null && (
-        <div style={SECTION}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-            <span style={{ fontSize: '13px', color: status.enabled ? '#22c55e' : '#94a3b8', fontWeight: 600 }}>
-              {status.enabled ? '✅ 运行中' : '⏸️ 已停用'}
-            </span>
-            <span style={{ fontSize: '12px', color: 'rgba(128,128,128,.7)' }}>{status.mode}</span>
-            <span style={{ fontSize: '12px', color: status.keyConfigured ? '#22c55e' : '#ef4444' }}>
-              {status.keyConfigured ? `Key ✅ (${status.keySource})` : 'Key ❌'}
-            </span>
-            <button style={{ ...BTN, marginLeft: 'auto', background: 'rgba(99,102,241,.15)', color: '#818cf8' }} onClick={toggleEnabled}>
-              {status.enabled ? '停用' : '启用'}
-            </button>
-            <button style={{ ...BTN, background: status.mode === 'enforce' ? 'rgba(239,68,68,.15)' : 'rgba(99,102,241,.15)', color: status.mode === 'enforce' ? '#f87171' : '#818cf8' }} onClick={toggleMode}>
-              {status.mode === 'shadow' ? '切 enforce' : '切 shadow'}
-            </button>
-          </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <div style={{ ...STAT_CARD }}>
-              <div style={STAT_LABEL}>Provider</div>
-              <div style={{ ...STAT_VALUE, fontSize: '14px' }}>{status.provider}</div>
-            </div>
-            <div style={{ ...STAT_CARD }}>
-              <div style={STAT_LABEL}>模型</div>
-              <div style={{ ...STAT_VALUE, fontSize: '14px' }}>{status.model}</div>
-            </div>
-            <div style={{ ...STAT_CARD }}>
-              <div style={STAT_LABEL}>守门人</div>
-              <div style={{ ...STAT_VALUE, fontSize: '14px' }}>{status.guardEnabled ? '✅' : '❌'}</div>
-            </div>
-            <div style={{ ...STAT_CARD }}>
-              <div style={STAT_LABEL}>预批</div>
-              <div style={{ ...STAT_VALUE, fontSize: '14px' }}>{status.preapproveEnabled ? '✅' : '❌'}</div>
-            </div>
-          </div>
-        </div>
-      )}
+      {loadError !== '' && <div style={S.error}>{loadError}</div>}
+      {msg !== null && <div style={msg.kind === 'ok' ? S.success : S.error}>{msg.text}</div>}
 
-      {/* Provider + Base URL + API Key 配置 */}
-      <div style={SECTION}>
-        <div style={LABEL}>Provider</div>
-        <div style={{ display: 'flex', gap: '6px', marginBottom: '12px' }}>
-          {(['typesafe', 'openrouter', 'custom'] as const).map(p => (
+      {/* Provider */}
+      <div style={S.card}>
+        <div style={S.label}>Provider</div>
+        <div style={S.row}>
+          {PROVIDERS.map(p => (
             <button
-              key={p}
+              key={p.id}
               style={{
-                ...BTN,
-                flex: '1',
-                background: (status?.provider ?? 'typesafe') === p ? 'rgba(99,102,241,.25)' : 'rgba(128,128,128,.1)',
-                color: (status?.provider ?? 'typesafe') === p ? '#818cf8' : 'rgba(128,128,128,.7)',
-                border: (status?.provider ?? 'typesafe') === p ? '1px solid rgba(99,102,241,.5)' : '1px solid transparent',
+                ...S.btn,
+                background: status?.provider === p.id ? 'rgba(99,102,241,.2)' : 'rgba(128,128,128,.08)',
+                color: status?.provider === p.id ? '#818cf8' : 'rgba(128,128,128,.7)',
+                border: status?.provider === p.id ? '1px solid rgba(99,102,241,.4)' : '1px solid transparent',
               }}
-              onClick={() => { void fetch('/api/jev-interceptor/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: p }) }).then(() => refresh()) }}
+              disabled={busy !== ''}
+              onClick={() => { void doAction(`provider:${p.id}`, { provider: p.id }) }}
             >
-              {p === 'typesafe' ? 'TypeSafe' : p === 'openrouter' ? 'OpenRouter' : '自定义'}
+              {busy === `provider:${p.id}` ? '···' : p.label}
             </button>
           ))}
         </div>
-
-        {(status?.provider ?? 'typesafe') === 'custom' && (
+        {status?.provider === 'custom' && (
           <>
-            <div style={LABEL}>Base URL</div>
+            <div style={{ ...S.label, marginTop: '10px' }}>Base URL（回车保存）</div>
             <input
-              style={{ ...INPUT, marginBottom: '12px' }}
+              style={S.input}
               placeholder="https://your-proxy.example.com/v1/systemone"
-              defaultValue={status?.model?.includes('~') ? '' : ''}
-              onKeyUp={(e) => {
-                if ((e as unknown as KeyboardEvent).key !== 'Enter') return
-                const val = (e.target as HTMLInputElement).value.trim()
-                if (val.length > 0) {
-                  void fetch('/api/jev-interceptor/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: val }) }).then(() => refresh())
-                }
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                const val = e.currentTarget.value.trim()
+                if (val.length > 0) void doAction('endpoint', { endpoint: val })
               }}
             />
           </>
         )}
+      </div>
 
-        <div style={LABEL}>API Key</div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+      {/* API Key */}
+      <div style={S.card}>
+        <div style={S.label}>API Key {status?.keyConfigured === true ? '· 已配置' : '· 未配置'}</div>
+        <div style={S.row}>
           <input
             type="password"
-            style={{ ...INPUT, flex: '1' }}
+            style={S.input}
             placeholder={status?.keyConfigured === true ? '已配置（输入新值覆盖）' : 'sk-or-v1-... 或 sk-...'}
             value={apiKey}
             onChange={(e) => { setApiKey(e.target.value) }}
           />
-          <button style={{ ...BTN, background: 'rgba(99,102,241,.2)', color: '#818cf8' }} disabled={saving} onClick={saveKey}>
-            {saving ? '保存中...' : '保存'}
+          <button
+            style={{ ...S.btn, background: 'rgba(99,102,241,.2)', color: '#818cf8' }}
+            disabled={busy !== '' || apiKey.trim().length < 10}
+            onClick={() => { void saveKey() }}
+          >
+            {busy === 'saveKey' ? '保存中···' : '保存'}
           </button>
         </div>
-        {message !== '' && <div style={{ marginTop: '6px', fontSize: '12px' }}>{message}</div>}
       </div>
 
-      {/* 决策统计 */}
+      {/* 状态 */}
+      {status !== null && (
+        <div style={S.card}>
+          <div style={S.row}>
+            <span style={{ padding: '4px 12px', borderRadius: '12px', fontSize: '12px', fontWeight: 500, background: status.enabled ? 'rgba(34,197,94,.15)' : 'rgba(128,128,128,.1)', color: status.enabled ? '#4ade80' : 'rgba(128,128,128,.6)' }}>
+              {status.enabled ? '运行中' : '已停用'}
+            </span>
+            <span style={{ padding: '4px 12px', borderRadius: '12px', fontSize: '12px', fontWeight: 500, background: status.mode === 'enforce' ? 'rgba(239,68,68,.12)' : 'rgba(99,102,241,.12)', color: status.mode === 'enforce' ? '#f87171' : '#818cf8' }}>
+              {status.mode}
+            </span>
+            <div style={{ flex: 1 }} />
+            <button
+              style={{ ...S.btn, background: status.enabled ? 'rgba(239,68,68,.12)' : 'rgba(99,102,241,.2)', color: status.enabled ? '#f87171' : '#818cf8' }}
+              disabled={busy !== ''}
+              onClick={() => { void doAction('enabled', { enabled: !status.enabled }) }}
+            >
+              {busy === 'enabled' ? '···' : status.enabled ? '停用' : '启用'}
+            </button>
+            <button
+              style={{ ...S.btn, background: status.mode === 'shadow' ? 'rgba(239,68,68,.12)' : 'rgba(128,128,128,.08)', color: status.mode === 'shadow' ? '#f87171' : 'rgba(128,128,128,.7)' }}
+              disabled={busy !== ''}
+              onClick={() => { void doAction('mode', { mode: status.mode === 'shadow' ? 'enforce' : 'shadow' }) }}
+            >
+              {busy === 'mode' ? '···' : status.mode === 'shadow' ? '切 enforce' : '切 shadow'}
+            </button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '8px', marginTop: '12px' }}>
+            <div style={S.statCard}><div style={S.statLabel}>Provider</div><div style={{ ...S.statValue, fontSize: '13px' }}>{status.provider}</div></div>
+            <div style={S.statCard}><div style={S.statLabel}>模型</div><div style={{ ...S.statValue, fontSize: '13px' }}>{status.model}</div></div>
+            <div style={S.statCard}><div style={S.statLabel}>守门人</div><div style={{ ...S.statValue, fontSize: '13px' }}>{status.guardEnabled ? '✅' : '❌'}</div></div>
+            <div style={S.statCard}><div style={S.statLabel}>预批</div><div style={{ ...S.statValue, fontSize: '13px' }}>{status.preapproveEnabled ? '✅' : '❌'}</div></div>
+          </div>
+        </div>
+      )}
+
+      {/* 统计 */}
       {stats.length > 0 && (
-        <div style={SECTION}>
-          <div style={{ ...LABEL, marginBottom: '8px' }}>决策统计（最近 200 条）</div>
-          {stats.map((s) => (
-            <div key={s.tag} style={{ marginBottom: '12px' }}>
+        <div style={S.card}>
+          <div style={{ ...S.label, marginBottom: '10px' }}>决策统计（最近 200 条）</div>
+          {stats.map(s => (
+            <div key={s.tag} style={{ marginBottom: '14px' }}>
               <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>
                 {TAG_LABELS[s.tag] ?? s.tag}
-              </div>
-              <div style={{ display: 'flex', gap: '6px', marginBottom: '6px', flexWrap: 'wrap' }}>
-                <span style={{ fontSize: '11px', color: 'rgba(128,128,128,.7)' }}>调用 {s.calls}</span>
-                <span style={{ fontSize: '11px', color: 'rgba(128,128,128,.7)' }}>降级 {s.degraded}</span>
-                <span style={{ fontSize: '11px', color: 'rgba(128,128,128,.7)' }}>缓存 {s.cached}</span>
-                {s.latencyP50 !== undefined && <span style={{ fontSize: '11px', color: 'rgba(128,128,128,.7)' }}>p50 {s.latencyP50}ms</span>}
-                {s.costUsd !== undefined && s.costUsd > 0 && <span style={{ fontSize: '11px', color: 'rgba(128,128,128,.7)' }}>${s.costUsd.toFixed(6)}</span>}
+                <span style={{ fontWeight: 400, color: 'rgba(128,128,128,.6)', marginLeft: '8px', fontSize: '11px' }}>
+                  {s.calls} 次{s.latencyP50 !== undefined ? ` · p50 ${s.latencyP50}ms` : ''}{s.costUsd !== undefined && s.costUsd > 0 ? ` · $${s.costUsd.toFixed(6)}` : ''}
+                </span>
               </div>
               {Object.entries(s.actions).map(([action, n]) => (
-                <Bar key={action} value={n} total={s.calls} label={ACTION_LABELS[action] ?? action} />
+                <div key={action} style={S.barRow}>
+                  <span style={S.barLabel}>{ACTION_LABELS[action] ?? action}</span>
+                  <div style={S.barTrack}>
+                    <div style={{ ...S.barFill, width: `${s.calls > 0 ? Math.round((n / s.calls) * 100) : 0}%` }} />
+                  </div>
+                  <span style={S.barValue}>{n}</span>
+                </div>
               ))}
               {s.agreementBuckets !== undefined && Object.keys(s.agreementBuckets).length > 0 && (
-                <div style={{ marginTop: '6px', padding: '6px', borderRadius: '4px', background: 'rgba(99,102,241,.08)' }}>
+                <div style={{ marginTop: '6px', padding: '6px 10px', borderRadius: '4px', background: 'rgba(99,102,241,.06)' }}>
                   {Object.entries(s.agreementBuckets).map(([bucket, n]) => (
-                    <div key={bucket} style={{ fontSize: '11px', color: 'rgba(128,128,128,.8)' }}>
-                      {bucket}: {n}
-                    </div>
+                    <div key={bucket} style={{ fontSize: '11px', color: 'rgba(128,128,128,.7)' }}>{bucket}: {n}</div>
                   ))}
                 </div>
               )}
@@ -279,16 +263,15 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         </div>
       )}
 
-      {status === null && stats.length === 0 && (
-        <div style={SECTION}>
-          <div style={{ textAlign: 'center', padding: '16px', color: 'rgba(128,128,128,.6)', fontSize: '13px' }}>
-            暂无数据。<br/>
-            <span style={{ fontSize: '11px' }}>保存 API Key 后，运行 /jev-on 启用插件，再回来查看决策统计。</span>
+      {status === null && stats.length === 0 && loadError === '' && (
+        <div style={S.card}>
+          <div style={{ textAlign: 'center', padding: '16px', color: 'rgba(128,128,128,.5)', fontSize: '13px' }}>
+            暂无数据——保存 API Key 后运行 /jev-on 启用插件
           </div>
         </div>
       )}
 
-      <div style={{ textAlign: 'center', fontSize: '11px', color: 'rgba(128,128,128,.4)', marginTop: '12px' }}>
+      <div style={{ textAlign: 'center', fontSize: '10px', color: 'rgba(128,128,128,.3)' }}>
         聊天框命令：/jev-on · /jev-off · /jev-mode · /jev-stats · /jev-status
       </div>
     </div>
