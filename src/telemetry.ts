@@ -102,6 +102,52 @@ export class Telemetry {
   }
 
   /**
+   * Structured per-hook aggregates for the panel API (`/api/jev-interceptor/stats`).
+   * @param tailLines - trailing N lines to aggregate (default 200).
+   * @returns one summary per tag.
+   */
+  async statsData(tailLines = 200): Promise<Array<{
+    tag: string
+    calls: number
+    degraded: number
+    cached: number
+    actions: Record<string, number>
+    latencyP50?: number
+    latencyP95?: number
+    costUsd?: number
+    inputTokens?: number
+    agreementBuckets?: Record<string, number>
+  }>> {
+    await this.ready().catch(() => undefined)
+    const entries = tailLines === undefined
+      ? await this.readEntries()
+      : await this.readTailEntries(tailLines)
+    const tags = new Map<string, TagStats>()
+    for (const entry of entries) {
+      const stats = tags.get(entry.tag) ?? emptyStats()
+      foldInto(stats, entry)
+      tags.set(entry.tag, stats)
+    }
+    const result: Array<Record<string, unknown>> = []
+    for (const [tag, stats] of tags) {
+      const sorted = [...stats.latencies].sort((a, b) => a - b)
+      const at = (f: number): number => sorted[Math.min(sorted.length - 1, Math.floor(f * sorted.length))] ?? 0
+      result.push({
+        tag,
+        calls: stats.calls,
+        degraded: stats.degraded,
+        cached: stats.cached,
+        actions: Object.fromEntries(stats.byAction),
+        ...(sorted.length > 0 ? { latencyP50: at(0.5), latencyP95: at(0.95) } : {}),
+        ...(stats.totalCostUsd > 0 ? { costUsd: stats.totalCostUsd } : {}),
+        ...(stats.totalInputTokens > 0 ? { inputTokens: stats.totalInputTokens } : {}),
+        ...(Object.keys(stats.approvalBuckets).length > 0 ? { agreementBuckets: stats.approvalBuckets } : {}),
+      })
+    }
+    return result as never
+  }
+
+  /**
    * Render per-hook aggregates for the `/jev-stats` command as a visual
    * chat-friendly report with bar charts and status indicators.
    * @param tailLines - when provided, aggregate only the trailing N lines

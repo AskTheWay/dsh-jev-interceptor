@@ -15,6 +15,9 @@
     "./session-reference": {
       "types": "./lib/session-reference.d.ts",
       "default": "./lib/session-reference.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
     }
   },
   "files": [
@@ -26,7 +29,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-client.mjs",
+    "build": "tsdown",
     "clean": "node -e \"fs.rmSync('lib', {force: true, recursive: true})\" --input-type=module 2>/dev/null || rimraf lib",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
@@ -49,10 +52,19 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
     }
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-client-connection": "*",
     "@deepseek-ai/dsh-commands": "*",
     "@deepseek-ai/dsh-compaction": "*",
     "@deepseek-ai/dsh-credentials": "*",
@@ -69,6 +81,8 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-agent": "0.1.7-alpha.2",
+    "@deepseek-ai/dsh-client-ui-layout": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.0.1-rc.1",
     "@deepseek-ai/dsh-commands": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-compaction": "0.1.7-alpha.2",
     "@deepseek-ai/dsh-credentials": "0.1.7-alpha.2",
@@ -86,6 +100,9 @@
     "@deepseek-ai/dsh-user-approval": "0.1.7-alpha.2",
     "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "react": "^19.3.1",
+    "tsdown": "^0.23.1",
     "typescript": "^5.8.0",
     "vitest": "^3.0.0"
   },

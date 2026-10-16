@@ -59,6 +59,7 @@ import { createGuardListener, PendingAsks } from './guard.js'
 import { createPreapproveListener } from './preapprove.js'
 import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
+import { registerJevApi } from './jev-api.js'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-jev-interceptor'
@@ -107,6 +108,7 @@ export function apply(ctx: Context, config: Config): void {
   // Register our Config schema with the settings provider → the Plugins page
   // discovers it via describe() and renders the form.
   ctx.inject(['settings'], (settingsCtx) => {
+    ctx.logger.info('dsh-jev-interceptor: settings service available, attempting registration')
     try {
       const service = settingsCtx.settings as unknown as {
         installSection: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: {
@@ -156,6 +158,36 @@ export function apply(ctx: Context, config: Config): void {
     resolveKey,
     telemetry,
     logger: ctx.logger,
+  })
+
+  // Panel API: browser-side settings page fetches from these routes.
+  registerJevApi(ctx, {
+    getStatus: () => {
+      const s = live()
+      const cfg = configOverride ?? config
+      return {
+        enabled: s.enabled,
+        mode: s.mode,
+        provider: cfg.provider ?? 'typesafe',
+        model: cfg.model ?? 'jev-latest',
+        keyConfigured: cfg.apiKey !== undefined && cfg.apiKey.length > 0,
+        keySource: cfg.apiKey !== undefined && cfg.apiKey.length > 0 ? 'config' : 'env',
+        guardEnabled: settings.guardEnabled,
+        preapproveEnabled: settings.preapproveEnabled,
+      }
+    },
+    getStats: () => telemetry.statsData(200),
+    updateConfig: async (patch) => {
+      const settingsService = ctx.get('settings')
+      if (settingsService !== undefined && typeof settingsService.update === 'function') {
+        await settingsService.update(SETTINGS_NS, patch)
+      } else {
+        // Fallback: apply in-memory for this run.
+        if (typeof patch['enabled'] === 'boolean') liveOverride = { ...live(), enabled: patch['enabled'] }
+        if (patch['mode'] === 'shadow' || patch['mode'] === 'enforce') liveOverride = { ...live(), mode: patch['mode'] }
+        if (typeof patch['apiKey'] === 'string') configOverride = { ...(configOverride ?? config), apiKey: patch['apiKey'] }
+      }
+    },
   })
 
   // Optional seams resolved defensively: the plugin loads in every profile.
