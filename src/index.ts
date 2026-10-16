@@ -107,22 +107,22 @@ export function apply(ctx: Context, config: Config): void {
   // Register our Config schema with the settings provider → the Plugins page
   // discovers it via describe() and renders the form.
   ctx.inject(['settings'], (settingsCtx) => {
-    const provider = settingsCtx.get('settings') as unknown as {
-      installSection?: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: {
-        setSource?: (source: unknown) => void
-      }) => void
-    }
-    if (provider !== undefined && typeof provider.installSection === 'function') {
-      provider.installSection(ctx, 'jev-interceptor', Config, config, {
+    try {
+      const service = settingsCtx.settings as unknown as {
+        installSection: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: {
+          setSource?: (source: unknown) => void
+        }) => void
+      }
+      service.installSection(ctx, 'jev-interceptor', Config, config, {
         setSource: (source) => {
-          // The settings service publishes the resolved value (base + user layer);
-          // adopt it so runtime toggles reflect persisted changes.
           if (typeof source === 'object' && source !== null) {
             configOverride = source as Config
           }
         },
       })
       ctx.logger.info('dsh-jev-interceptor: Settings form registered — configure in Settings → Plugins')
+    } catch (error: unknown) {
+      ctx.logger.warn(`dsh-jev-interceptor: Settings registration failed (${error instanceof Error ? error.message : String(error)})`)
     }
   })
 
