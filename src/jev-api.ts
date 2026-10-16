@@ -53,14 +53,14 @@ export function registerJevApi(
   connection.fetch.register({
     path: `${BASE}/status`,
     methods: ['GET'],
-    requestBody: 'none',
+    requestBody: 'buffered',
     fetch: async () => json(deps.getStatus()),
   })
 
   connection.fetch.register({
     path: `${BASE}/stats`,
     methods: ['GET'],
-    requestBody: 'none',
+    requestBody: 'buffered',
     fetch: async () => json(await deps.getStats()),
   })
 
@@ -72,7 +72,7 @@ export function registerJevApi(
       try {
         const body = JSON.parse(await request.text()) as Record<string, unknown>
         // Whitelist: only these fields are updatable from the panel.
-        const allowed = ['enabled', 'mode', 'apiKey', 'provider']
+        const allowed = ['enabled', 'mode', 'apiKey', 'provider', 'endpoint']
         const patch: Record<string, unknown> = {}
         for (const key of allowed) {
           if (Object.hasOwn(body, key)) patch[key] = body[key]

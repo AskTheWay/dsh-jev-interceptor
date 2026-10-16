@@ -191,8 +191,45 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         </div>
       )}
 
-      {/* API Key 配置 */}
+      {/* Provider + Base URL + API Key 配置 */}
       <div style={SECTION}>
+        <div style={LABEL}>Provider</div>
+        <div style={{ display: 'flex', gap: '6px', marginBottom: '12px' }}>
+          {(['typesafe', 'openrouter', 'custom'] as const).map(p => (
+            <button
+              key={p}
+              style={{
+                ...BTN,
+                flex: '1',
+                background: (status?.provider ?? 'typesafe') === p ? 'rgba(99,102,241,.25)' : 'rgba(128,128,128,.1)',
+                color: (status?.provider ?? 'typesafe') === p ? '#818cf8' : 'rgba(128,128,128,.7)',
+                border: (status?.provider ?? 'typesafe') === p ? '1px solid rgba(99,102,241,.5)' : '1px solid transparent',
+              }}
+              onClick={() => { void fetch('/api/jev-interceptor/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: p }) }).then(() => refresh()) }}
+            >
+              {p === 'typesafe' ? 'TypeSafe' : p === 'openrouter' ? 'OpenRouter' : '自定义'}
+            </button>
+          ))}
+        </div>
+
+        {(status?.provider ?? 'typesafe') === 'custom' && (
+          <>
+            <div style={LABEL}>Base URL</div>
+            <input
+              style={{ ...INPUT, marginBottom: '12px' }}
+              placeholder="https://your-proxy.example.com/v1/systemone"
+              defaultValue={status?.model?.includes('~') ? '' : ''}
+              onKeyUp={(e) => {
+                if ((e as unknown as KeyboardEvent).key !== 'Enter') return
+                const val = (e.target as HTMLInputElement).value.trim()
+                if (val.length > 0) {
+                  void fetch('/api/jev-interceptor/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: val }) }).then(() => refresh())
+                }
+              }}
+            />
+          </>
+        )}
+
         <div style={LABEL}>API Key</div>
         <div style={{ display: 'flex', gap: '8px' }}>
           <input
@@ -243,8 +280,11 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       )}
 
       {status === null && stats.length === 0 && (
-        <div style={{ textAlign: 'center', padding: '24px', color: 'rgba(128,128,128,.6)', fontSize: '13px' }}>
-          加载中...（如果持续空白，请确认插件已启用）
+        <div style={SECTION}>
+          <div style={{ textAlign: 'center', padding: '16px', color: 'rgba(128,128,128,.6)', fontSize: '13px' }}>
+            暂无数据。<br/>
+            <span style={{ fontSize: '11px' }}>保存 API Key 后，运行 /jev-on 启用插件，再回来查看决策统计。</span>
+          </div>
         </div>
       )}
 
