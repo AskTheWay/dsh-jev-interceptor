@@ -63,6 +63,8 @@ export interface ClassifyCall {
   readonly mode: 'shadow' | 'enforce'
   readonly tool?: string
   readonly sessionId?: string
+  /** 触发决策的工具调用 id，透传进降级遥测（可答调用由各钩子自行记录）。 */
+  readonly callId?: string
   readonly state: string | Readonly<Record<string, unknown>>
   readonly questions: Readonly<Record<string, JevQuestion>>
   readonly signal?: AbortSignal
@@ -138,6 +140,7 @@ export class JevClient {
         mode: call.mode,
         ...(call.tool === undefined ? {} : { tool: call.tool }),
         ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }),
+        ...(call.callId === undefined ? {} : { callId: call.callId }),
         action: 'degraded',
         detail: reason,
         ...(reason === 'no-key' || reason === 'cooldown' ? {} : { latencyMs: this.now() - started }),

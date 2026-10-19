@@ -206,7 +206,9 @@ export function createGuardListener(
       // evaluateGuard already recorded the bounded preview for the pre-approval question.
       return { kind: 'ask', reason: action.reason }
     }
-    return { kind: 'deny', reason: action.reason, info: GUARD_DENY_INFO }
+    // info.reason 是上游 ToolErrorInfo 专设的用户可见通道（durable 投影保留、
+    // model-facing content 不含）：把同一份拦截理由送进审计与面板回放。
+    return { kind: 'deny', reason: action.reason, info: { ...GUARD_DENY_INFO, reason: action.reason } }
   }
 }
 
@@ -238,6 +240,7 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
     mode: live.mode,
     tool: exec.name,
     sessionId: session.id,
+    callId: exec.callId,
     state,
     questions: GUARD_QUESTIONS,
     signal: exec.signal,
@@ -251,6 +254,7 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
       mode: live.mode,
       tool: exec.name,
       sessionId: session.id,
+      callId: exec.callId,
       action: 'degraded',
       detail: 'answer-shape-mismatch',
       latencyMs: answers.latencyMs,
@@ -264,6 +268,7 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
     mode: live.mode,
     tool: exec.name,
     sessionId: session.id,
+    callId: exec.callId,
     model: answers.model,
     action: action.kind,
     detail: answerDetail(extracted),
@@ -271,6 +276,13 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
     ...(answers.inputTokens === undefined ? {} : { inputTokens: answers.inputTokens }),
     ...(answers.costUsd === undefined ? {} : { costUsd: answers.costUsd }),
     cached: answers.cached,
+    // 全精度数值样本：键表与 detail token 同名，校准器（calibrate.ts）据此重放。
+    scores: {
+      risk_p: extracted.risk.confidence,
+      irrev: extracted.irreversible.noul,
+      task: extracted.matchesTask.noul,
+      inj: extracted.injectionSuspect.noul,
+    },
   })
   // Stash the bounded argument preview for the pre-approval question.
   if (action.kind === 'ask' || action.kind === 'deny') {

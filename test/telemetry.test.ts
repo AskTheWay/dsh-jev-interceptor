@@ -53,3 +53,50 @@ describe('Telemetry.stats', () => {
     expect(text).not.toContain('agreement:')
   })
 })
+
+describe('Telemetry.entries', () => {
+  it('returns the whole log without an argument and only the tail with one', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-tel-'))
+    const telemetry = new Telemetry(dir)
+    for (let i = 1; i <= 5; i++) {
+      telemetry.record({ ...base, action: 'delegate' as const, detail: `#${String(i)}` })
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const all = await telemetry.entries()
+    expect(all).toHaveLength(5)
+    expect(all.at(-1)?.detail).toBe('#5')
+    const tail = await telemetry.entries(2)
+    expect(tail).toHaveLength(2)
+    expect(tail[0]?.detail).toBe('#4')
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('reads an absent log as empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-tel-'))
+    const telemetry = new Telemetry(dir)
+    expect(await telemetry.entries()).toEqual([])
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('Telemetry.recentEntries', () => {
+  it('returns exactly the last N entries (oldest first) even with long lines', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-tel-'))
+    const telemetry = new Telemetry(dir)
+    // 长行（detail 2 KB）逼出窗口翻倍路径。
+    for (let i = 1; i <= 6; i++) {
+      telemetry.record({
+        ...base,
+        action: 'delegate' as const,
+        detail: i <= 2 ? `#${String(i)} ${'x'.repeat(2048)}` : `#${String(i)}`,
+      })
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const four = await telemetry.recentEntries(4)
+    expect(four.map(e => e.detail?.slice(0, 2))).toEqual(['#3', '#4', '#5', '#6'])
+    const all = await telemetry.recentEntries(100)
+    expect(all).toHaveLength(6)
+    expect(await telemetry.recentEntries(0)).toEqual([])
+    await rm(dir, { recursive: true, force: true })
+  })
+})

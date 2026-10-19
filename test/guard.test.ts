@@ -130,6 +130,8 @@ describe('createGuardListener', () => {
     if (decision.kind === 'deny') {
       expect(decision.reason.startsWith('jev-guard:')).toBe(true)
       expect(decision.info?.code).toBe('JEV_GUARD_DENY')
+      // info.reason 是上游的用户可见通道（durable 投影保留）：与拦截 reason 同文。
+      expect(decision.info?.reason).toBe(decision.reason)
     }
   })
 

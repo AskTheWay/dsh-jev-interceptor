@@ -62,6 +62,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 ```
 /jev-on                 # 启用（默认 shadow 模式——只记录，不执行）
 /jev-stats              # 看它怎么判，含完整概率分布
+/jev-log 20 --json      # 最近 N 条决策明细；--json/--csv 导出原始数据
+/jev-calibrate          # 影子数据阈值建议（绝不自动应用）
 /jev-mode enforce       # 数字满意后升级
 /jev-off                # 回到原生行为
 ```
@@ -86,9 +88,11 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **输入限界。** 参数头尾预览 + 尾部消息摘要——Jev 官方指引就是"代码先过滤，只发问题需要的字段"。
 - **构造级韧性。** 每次尝试墙钟超时、429/529 单次重试、连续失败进冷却（超时也计数）、并发上限、LRU 决策缓存、排队有界的信号量。provider 挂掉的代价是零行为差异，不是你的 harness。
 - **接管行按层禁用。** `jev-session-reference` 行替换了上游 `session-reference` 行；在 Plugins 页单独关掉这一行会落得*没有任何* session-reference 在运行。移除接管请禁用整个 `dsh-jev-interceptor` bundle 层（`setBundleEnabled(false)`），上游行随之恢复。
-- **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`）；`/jev-stats` 按挂点汇总。
+- **拦截可解释。** 每次 `ask`/`deny` 都带着人读理由和完整证据摘要直达审批卡与被拦工具行（`jev-guard: 中风险调用，需人工确认（risk=medium 0.72 · irrev=0.30 · inj=0.01）`）。行首 `jev-guard:` 前缀是安全协议——预批钩子靠它拒绝自动批守门人自己的升级。
+- **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`），带 `callId` 关联与供校准重放的全精度 `scores` 数值；日志超 20MB 自动轮转。`/jev-stats` 按挂点汇总、`/jev-log` 看单条明细、Web 面板全部图表化。
+- **校准而非拍脑袋。** `/jev-calibrate` 把影子遥测喂给*同一个*决策矩阵做反事实重放，输出阈值调整建议（±0.05 步长、常规建议 ≥30 样本——出现误批危险信号时 ≥10 条即建议收紧，仅收紧方向；注入阈值永不放松、绝不自动应用）。
 
-以上全部由 **77 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
+以上全部由 **130 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
 
 ## 配置
 
@@ -97,6 +101,15 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - 只读工具（`read`、`read_image`、`grep`、`glob`、`todo_write`）**零成本**直通；
 - Auto 权限预设完全让位给 `auto-review`（不双重审查、不双重计费）；
 - 预批白名单默认**为空**——在 `preapproveToolAllowlist` 里点名工具之前，任何调用都不会被自动批准。
+
+**停滞检测**（v0.5，opt-in，默认关）——dsh 的 repeat-tool-reminder 只能识别*精确重复*；换参数的死循环对它不可见。同一工具换参失败 ≥4 次时，一次 Jev fan-out 判断"无进展 + 同类失败"，高置信则（仅 enforce 模式；shadow 只在遥测里记一条 would-be 提醒）注入一条提醒让 agent 停下换路（observe-and-enrich——绝不拦截结果）：
+
+```yaml
+    stagnationEnabled: true        # 默认 false
+    stagnationTriggerCount: 4      # 换参失败几次后发起判断
+    stagnationConfidenceMin: 0.85  # 双 noul 都过此门才提醒
+    stagnationCooldownMs: 300000   # 同一工具每 5 分钟最多提醒一次
+```
 
 语义会话保留是独立的一行（默认关闭且逐字节等同原版）：
 
@@ -123,16 +136,15 @@ OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用�
 ```sh
 npm install --legacy-peer-deps   # devDeps 钉在当前一代 dsh API
 npm run typecheck                # src + tests，对真实 @deepseek-ai 类型
-npm test                         # vitest，77 个测试，无需网络
+npm test                         # vitest，130 个测试，无需网络
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # 对真实 provider 跑一次决策
 ```
 
 ## 路线图
 
-审批闭环（v0.1）与语义会话保留（v0.2）已落地。已核实的下一战场——让"选择"而不只是"安全"用上 System-1（[完整目录](docs/jev-usage-points.zh.md)）：
+审批闭环（v0.1）、语义会话保留（v0.2）、图像卸载预规划（v0.4）、停滞检测（v0.5）已落地。已核实的下一战场——让"选择"而不只是"安全"用上 System-1（[完整目录](docs/jev-usage-points.zh.md)）：
 
-- **图像卸载预规划**——dsh 自己的 README 承认"nothing plans an offload before dispatch"；Jev 来规划
 - **内容感知模型路由**——例行步骤走便宜档，硬仗上强模型
 - **工人报告核验**——子代理说"做完了"，得有东西查一查
 

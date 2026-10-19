@@ -6,6 +6,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { CalibrationReport } from './calibrate.js'
+import { clampLogLimit, LOG_PANEL_N, type TelemetryEntry } from './telemetry.js'
 
 const BASE = '/api/jev-interceptor'
 
@@ -18,6 +20,7 @@ export interface JevPanelStatus {
   keySource: 'config' | 'credentials' | 'env' | 'none'
   guardEnabled: boolean
   preapproveEnabled: boolean
+  stagnationEnabled: boolean
 }
 
 export interface JevPanelTagSummary {
@@ -38,6 +41,10 @@ export function registerJevApi(
   deps: {
     getStatus: () => JevPanelStatus
     getStats: () => Promise<JevPanelTagSummary[]>
+    /** 校准报告（面板只读展示；纯读，无状态写入）。 */
+    getCalibration: () => Promise<CalibrationReport>
+    /** 决策明细（/log 路由用；detail 只含枚举与数值 token，无敏感数据）。 */
+    getLog: (limit: number) => Promise<TelemetryEntry[]>
     updateConfig: (patch: Record<string, unknown>) => Promise<void>
   },
 ): void {
@@ -62,6 +69,22 @@ export function registerJevApi(
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: async () => json(await deps.getStats()),
+  })
+
+  connection.fetch.register({
+    path: `${BASE}/calibration`,
+    methods: ['GET'],
+    requestBody: 'buffered',
+    fetch: async () => json(await deps.getCalibration()),
+  })
+
+  connection.fetch.register({
+    path: `${BASE}/log`,
+    methods: ['GET'],
+    requestBody: 'buffered',
+    fetch: async (request: Request) => json(
+      await deps.getLog(clampLogLimit(new URL(request.url).searchParams.get('limit'), LOG_PANEL_N)),
+    ),
   })
 
   connection.fetch.register({

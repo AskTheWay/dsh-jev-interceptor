@@ -147,6 +147,7 @@ async function evaluatePreapprove(
     mode: live.mode,
     tool: req.toolName,
     sessionId: session.id,
+    callId: req.callId === undefined ? undefined : String(req.callId),
     state,
     questions: PREAPPROVE_QUESTIONS,
     signal: req.signal,
@@ -160,6 +161,7 @@ async function evaluatePreapprove(
       mode: live.mode,
       tool: req.toolName,
       sessionId: session.id,
+      callId: req.callId === undefined ? undefined : String(req.callId),
       action: 'degraded',
       detail: 'answer-shape-mismatch',
       latencyMs: result.latencyMs,
@@ -173,6 +175,7 @@ async function evaluatePreapprove(
     mode: live.mode,
     tool: req.toolName,
     sessionId: session.id,
+    callId: req.callId === undefined ? undefined : String(req.callId),
     model: result.model,
     action: verdict.kind === 'auto-approve' ? 'auto-approve' : 'human',
     detail: `scope=${extracted.withinGrantedScope.noul.toFixed(2)} reversible=${extracted.reversible.noul.toFixed(2)}`
@@ -182,6 +185,12 @@ async function evaluatePreapprove(
     ...(result.inputTokens === undefined ? {} : { inputTokens: result.inputTokens }),
     ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
     cached: result.cached,
+    // 全精度数值样本：键表与 detail token 同名，校准器（calibrate.ts）据此重放。
+    scores: {
+      scope: extracted.withinGrantedScope.noul,
+      reversible: extracted.reversible.noul,
+      inj: extracted.injectionSuspect.noul,
+    },
   })
   return verdict
 }

@@ -11,7 +11,7 @@ import { appendFile, mkdir, open, readFile, stat, rename } from 'node:fs/promise
 import { dirname, join } from 'node:path'
 
 /** Where a decision came from. */
-export type DecisionTag = 'guard' | 'preapprove' | 'session-reference' | 'approval-loop'
+export type DecisionTag = 'guard' | 'preapprove' | 'session-reference' | 'approval-loop' | 'stagnation'
 
 /** What the plugin did (or, in shadow mode, would have done). */
 export type DecisionAction =
@@ -25,6 +25,7 @@ export type DecisionAction =
   | 'retention-scored'
   | 'retention-fifo'
   | 'agreement'
+  | 'stagnation-alert'
 
 /** One durable telemetry record. */
 export interface TelemetryEntry {
@@ -38,6 +39,8 @@ export interface TelemetryEntry {
   readonly tool?: string
   /** Session id, when reachable from the hook. */
   readonly sessionId?: string
+  /** 触发决策的工具调用 id；与 tool/call、approval/asked 的 callId 对齐，供明细关联。 */
+  readonly callId?: string
   /** Model version reported by the provider. */
   readonly model?: string
   /** Action taken (or that would have been taken in shadow mode). */
@@ -52,6 +55,13 @@ export interface TelemetryEntry {
   readonly costUsd?: number
   /** Whether the answers came from the input cache. */
   readonly cached?: boolean
+  /**
+   * 决策数值样本（guard/preapprove 的已答调用专属），供校准器全精度重放。
+   * 键表固定与 detail token 同名：guard 为 `risk_p`/`irrev`/`task`/`inj`，
+   * preapprove 为 `scope`/`reversible`/`inj`，值域 [0,1]。旧记录无此字段，
+   * 读侧（calibrate）回退 detail 正则解析。
+   */
+  readonly scores?: Readonly<Record<string, number>>
 }
 
 /** Aggregate counters for one hook. */
@@ -73,12 +83,17 @@ const JEV_USD_PER_MTOK = 0.042
 /** Rotate the log above this size (bytes). */
 const ROTATE_BYTES = 20 * 1024 * 1024
 
+/** 尾部按块读取的翻倍上限：病态长行也最多读 2MB（recentEntries 的窗口封顶）。 */
+const TAIL_CHUNK_MAX_BYTES = 2 * 1024 * 1024
+
 /**
  * File-backed telemetry writer; `/jev-stats` aggregates by re-reading the log.
  */
 export class Telemetry {
   private readonly file: string
   private dirReady: Promise<void> | undefined
+  /** 串行写队列：并发 appendFile 的完成顺序无保证，链式追加保证日志顺序。 */
+  private writeQueue: Promise<void> = Promise.resolve()
   private rotated = false
 
   /**
@@ -90,15 +105,33 @@ export class Telemetry {
 
   /**
    * Append one record. Never throws: a telemetry failure is swallowed because
-   * the decision path already committed.
+   * the decision path already committed. Writes are chained so records land in
+   * the log in the order they were recorded.
    * @param entry - the record to persist.
    */
   record(entry: TelemetryEntry): void {
-    void this.ready()
+    this.writeQueue = this.writeQueue
+      .then(() => this.ready())
       .then(() => appendFile(this.file, `${JSON.stringify(entry)}\n`, 'utf8'))
       .catch(() => {
         // Telemetry is best-effort; nothing downstream depends on it.
       })
+  }
+
+  /**
+   * Read telemetry records: the whole active log or only its trailing N lines
+   * (a torn line reads as absent). Shared read path for `/jev-stats`, the
+   * panel API, and the calibrator.
+   * @param tailLines - when omitted, read every record; otherwise only the
+   *   trailing N lines.
+   * @returns parsed records; an unreadable log reads as empty (never throws).
+   */
+  async entries(tailLines?: number): Promise<TelemetryEntry[]> {
+    await this.ready().catch(() => undefined)
+    if (tailLines === undefined) return await this.readEntries()
+    // readTailEntries 按字节窗口读取，条数可能多于 n；精确截到尾部 n 条。
+    const raw = await this.readTailEntries(tailLines)
+    return tailLines <= 0 ? [] : raw.slice(-tailLines)
   }
 
   /**
@@ -118,10 +151,7 @@ export class Telemetry {
     inputTokens?: number
     agreementBuckets?: Record<string, number>
   }>> {
-    await this.ready().catch(() => undefined)
-    const entries = tailLines === undefined
-      ? await this.readEntries()
-      : await this.readTailEntries(tailLines)
+    const entries = await this.entries(tailLines)
     const tags = new Map<string, TagStats>()
     for (const entry of entries) {
       const stats = tags.get(entry.tag) ?? emptyStats()
@@ -155,10 +185,7 @@ export class Telemetry {
    * @returns a human-readable plain-text report with ASCII visualizations.
    */
   async stats(tailLines?: number): Promise<string> {
-    await this.ready().catch(() => undefined)
-    const entries = tailLines === undefined
-      ? await this.readEntries()
-      : await this.readTailEntries(tailLines)
+    const entries = await this.entries(tailLines)
     const tags = new Map<string, TagStats>()
     for (const entry of entries) {
       const stats = tags.get(entry.tag) ?? emptyStats()
@@ -209,29 +236,47 @@ export class Telemetry {
       lines.push('')
     }
     lines.push('━'.repeat(44))
-    lines.push('  详细: /jev-stats --all │ 状态: /jev-status')
+    lines.push('  详细: /jev-stats --all │ 明细: /jev-log │ 状态: /jev-status')
     lines.push('```')
     return lines.join('\n')
   }
 
   /**
-   * Read only the trailing N entries without parsing the whole file: stat the
-   * size, read the last chunk, and split. A torn head line from the chunk
-   * boundary reads as absent.
+   * Read the most recent N entries exactly: the byte window starts at
+   * N×(1 KB upper bound) and doubles until N entries are covered (whole file
+   * or the 2 MB ceiling). IO failures read as empty.
+   * @param n - how many recent entries to return.
+   * @returns at most N entries, oldest first.
    */
-  private async readTailEntries(n: number): Promise<TelemetryEntry[]> {
+  async recentEntries(n: number): Promise<TelemetryEntry[]> {
+    if (n <= 0) return []
+    let chunkBytes = n * 1024 + 4096
+    for (;;) {
+      const { entries, sawWholeFile } = await this.readTailChunk(chunkBytes)
+      if (entries.length >= n || sawWholeFile || chunkBytes >= TAIL_CHUNK_MAX_BYTES) {
+        return entries.slice(-n)
+      }
+      chunkBytes = Math.min(chunkBytes * 2, TAIL_CHUNK_MAX_BYTES)
+    }
+  }
+
+  /**
+   * Read only the trailing chunk without parsing the whole file: stat the
+   * size, read the last `chunkBytes` bytes, and split. A torn head line from
+   * the chunk boundary reads as absent.
+   */
+  private async readTailChunk(chunkBytes: number): Promise<{ entries: TelemetryEntry[]; sawWholeFile: boolean }> {
     try {
       const info = await stat(this.file)
-      // Assume ~1 KB per line as an upper bound; read at most that many bytes.
-      const chunkBytes = Math.min(info.size, n * 1024 + 4096)
+      const readBytes = Math.min(chunkBytes, info.size)
       const handle = await open(this.file, 'r')
       try {
-        const buffer = Buffer.alloc(chunkBytes)
-        const { bytesRead } = await handle.read(buffer, 0, chunkBytes, info.size - chunkBytes)
+        const buffer = Buffer.alloc(readBytes)
+        const { bytesRead } = await handle.read(buffer, 0, readBytes, info.size - readBytes)
         const raw = buffer.subarray(0, bytesRead).toString('utf8')
         const lines = raw.split('\n').filter(line => line.length > 0)
         // Drop the first line if it's a torn head (chunk started mid-line).
-        if (chunkBytes < info.size && lines.length > 0) lines.shift()
+        if (readBytes < info.size && lines.length > 0) lines.shift()
         const entries: TelemetryEntry[] = []
         for (const line of lines) {
           try {
@@ -240,13 +285,22 @@ export class Telemetry {
             // Torn or malformed line reads as absent.
           }
         }
-        return entries
+        return { entries, sawWholeFile: readBytes >= info.size }
       } finally {
         await handle.close()
       }
     } catch {
-      return []
+      return { entries: [], sawWholeFile: false }
     }
+  }
+
+  /**
+   * Read only the trailing N entries (approximate: the byte window may yield
+   * more than N; callers wanting exact counts use {@link recentEntries}).
+   */
+  private async readTailEntries(n: number): Promise<TelemetryEntry[]> {
+    const { entries } = await this.readTailChunk(n * 1024 + 4096)
+    return entries
   }
 
   /**
@@ -360,6 +414,7 @@ const TAG_LABELS: Readonly<Record<string, string>> = {
   preapprove: '预批（自动审批）',
   'session-reference': '会话保留打分',
   'approval-loop': '审批一致率',
+  stagnation: '停滞检测（换参循环）',
 }
 
 /** Action 中文标签 */
@@ -374,6 +429,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   'retention-scored': '打分保留',
   'retention-fifo': 'FIFO保留',
   agreement: '一致率',
+  'stagnation-alert': '停滞提醒',
 }
 
 /** Agreement bucket 中文标签 */
@@ -414,4 +470,159 @@ function padEnd(text: string, targetWidth: number): string {
   }
   const padding = Math.max(0, targetWidth - displayWidth)
   return text + ' '.repeat(padding)
+}
+
+// ── /jev-log 决策明细 ────────────────────────────────────────────────────
+
+/** /jev-log 默认展示条数。 */
+export const LOG_DEFAULT_N = 20
+/** /jev-log 与 /log 路由的条数上限。 */
+export const LOG_MAX_N = 500
+/** 面板「最近决策」默认拉取条数。 */
+export const LOG_PANEL_N = 50
+
+/** /jev-log 解析后的输入。 */
+export interface LogArgs {
+  /** 展示条数，已夹取到 [1, LOG_MAX_N]。 */
+  n: number
+  /** 输出形态：table 聊天表格；json/csv 原始数据导出。 */
+  format: 'table' | 'json' | 'csv'
+}
+
+/**
+ * 解析 /jev-log 的 rawInput（`[n] [--json] [--csv]`）。
+ * n 缺省 20、非数字忽略、越界夹取；--json 与 --csv 同给按 --json。
+ * @param raw - 命令名之后的原始输入。
+ */
+export function parseLogArgs(raw: string): LogArgs {
+  const tokens = raw.trim().split(/\s+/).filter(token => token.length > 0)
+  let n: number | undefined
+  let format: LogArgs['format'] = 'table'
+  for (const token of tokens) {
+    if (token === '--json') format = 'json'
+    else if (token === '--csv') {
+      if (format !== 'json') format = 'csv'
+    } else {
+      const parsed = Number.parseInt(token, 10)
+      if (Number.isFinite(parsed)) n = parsed
+    }
+  }
+  return { n: Math.min(LOG_MAX_N, Math.max(1, n ?? LOG_DEFAULT_N)), format }
+}
+
+/**
+ * 把 limit 查询参数（字符串或数字）夹取到 [1, LOG_MAX_N]；非法回退 fallback。
+ * @param value - 原始查询参数值。
+ * @param fallback - 非法时的回退值。
+ */
+export function clampLogLimit(value: string | number | null | undefined, fallback: number): number {
+  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value ?? ''), 10)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(LOG_MAX_N, Math.max(1, parsed))
+}
+
+/**
+ * 明细表 detail 摘要：压平换行为空格并截断到 maxChars 加省略号。
+ * @param detail - 原始 detail（只含枚举与数值 token，无敏感数据）。
+ * @param maxChars - 截断上限（默认 48）。
+ */
+export function detailPreview(detail: string | undefined, maxChars = 48): string {
+  if (detail === undefined) return '—'
+  const flat = detail.replaceAll(/\s+/g, ' ').trim()
+  return flat.length <= maxChars ? flat : `${flat.slice(0, maxChars)}…`
+}
+
+/** 明细表短标签（比 TAG_LABELS 更紧凑，含全部 tag）。 */
+const LOG_TAG_LABELS: Readonly<Record<string, string>> = {
+  guard: '守门',
+  preapprove: '预批',
+  'session-reference': '保留',
+  'approval-loop': '一致率',
+  stagnation: '停滞',
+}
+
+/** 明细表模式短标签。 */
+const LOG_MODE_LABELS: Readonly<Record<string, string>> = {
+  shadow: '观察',
+  enforce: '执行',
+}
+
+/** 明细表动作短标签（复用 ACTION_LABELS 的键，取两字形态）。 */
+const LOG_ACTION_LABELS: Readonly<Record<string, string>> = {
+  delegate: '放行',
+  ask: '转人工',
+  deny: '拒绝',
+  'auto-approve': '自动批',
+  human: '人工',
+  degraded: '降级',
+  skipped: '跳过',
+  'retention-scored': '打分',
+  'retention-fifo': 'FIFO',
+  agreement: '一致',
+  'stagnation-alert': '提醒',
+}
+
+/**
+ * 渲染最近决策明细表（新→旧）：时间(UTC)│挂点│工具│模式│动作│延迟│理由。
+ * @param entries - 明细记录（旧→新，内部反转展示）。
+ * @param fullPath - 当前日志文件全量路径（页脚展示，可选）。
+ * @returns 自带 ``` 包裹的中文表格。
+ */
+export function renderLogTable(entries: readonly TelemetryEntry[], fullPath?: string): string {
+  const lines: string[] = ['```']
+  lines.push(`⚡ dsh-jev-interceptor 决策明细（最近 ${String(entries.length)} 条）`)
+  lines.push('')
+  for (const entry of [...entries].reverse()) {
+    const time = entry.ts.slice(11, 19)
+    const tag = LOG_TAG_LABELS[entry.tag] ?? entry.tag
+    const mode = LOG_MODE_LABELS[entry.mode] ?? entry.mode
+    const action = LOG_ACTION_LABELS[entry.action] ?? entry.action
+    const latency = entry.latencyMs === undefined ? '—' : `${String(entry.latencyMs)}ms`
+    lines.push(
+      `${time} ${padEnd(tag, 6)} ${padEnd(entry.tool ?? '—', 10)} ${mode} ${padEnd(action, 6)}`
+      + ` ${padEnd(latency, 6)} ${detailPreview(entry.detail)}${entry.cached === true ? ' ⚡' : ''}`,
+    )
+  }
+  lines.push('')
+  lines.push('━'.repeat(44))
+  lines.push('  导出: /jev-log <n> --json | --csv')
+  if (fullPath !== undefined) lines.push(`  全量: ${fullPath}`)
+  lines.push('```')
+  return lines.join('\n')
+}
+
+/** CSV 导出列（表头即这些键名）。 */
+export const LOG_CSV_COLUMNS = [
+  'ts', 'tag', 'mode', 'tool', 'callId', 'action', 'detail', 'latencyMs', 'cached', 'inputTokens', 'costUsd',
+] as const
+
+/** RFC 4180 转义：含逗号/引号的字段引号包裹、内部引号翻倍、换行压平为空格。 */
+function csvCell(value: string): string {
+  const flat = value.replaceAll(/\s+/g, ' ')
+  if (/[",]/.test(flat)) return `"${flat.replaceAll('"', '""')}"`
+  return flat
+}
+
+/**
+ * 导出为 CSV：表头行 + 每条一行（detail 只含枚举与数值 token，无敏感数据）。
+ * @param entries - 要导出的记录。
+ */
+export function toLogCsv(entries: readonly TelemetryEntry[]): string {
+  const rows = [LOG_CSV_COLUMNS.join(',')]
+  for (const entry of entries) {
+    const cells = LOG_CSV_COLUMNS.map(column => {
+      const value = (entry as unknown as Record<string, unknown>)[column]
+      return csvCell(value === undefined || value === null ? '' : String(value))
+    })
+    rows.push(cells.join(','))
+  }
+  return rows.join('\n')
+}
+
+/**
+ * 导出为紧凑 JSON 数组（jq 可直接消费）。
+ * @param entries - 要导出的记录。
+ */
+export function toLogJson(entries: readonly TelemetryEntry[]): string {
+  return JSON.stringify(entries)
 }

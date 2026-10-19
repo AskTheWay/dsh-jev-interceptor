@@ -62,6 +62,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 ```
 /jev-on                 # enable (starts in shadow mode — records, never acts)
 /jev-stats              # watch what it decides, with full probability distributions
+/jev-log 20 --json      # the last N decisions, one per line; --json/--csv export
+/jev-calibrate          # shadow-data threshold advice (never auto-applies)
 /jev-mode enforce       # promote once the numbers look right
 /jev-off                # back to stock behavior
 ```
@@ -86,9 +88,11 @@ Happy with the numbers? Flip `mode: enforce`. That's the whole rollout plan — 
 - **Bounded input.** Head+tail argument previews and trailing-message digests — Jev's own guidance is to filter in code and send only what a question needs.
 - **Resilient by construction.** Wall-clock timeout per attempt, single retry on 429/529, cooldown after consecutive failures (timeouts count), concurrency cap, LRU decision cache, queue-bound semaphore. A dead provider costs you zero behavior, not your harness.
 - **Takeover rows disable as a layer.** The `jev-session-reference` row replaces the upstream `session-reference` row; toggling only this row off in the Plugins UI would leave *no* session-reference active. Remove the takeover by disabling the whole `dsh-jev-interceptor` bundle layer (`setBundleEnabled(false)`), which restores the upstream row.
-- **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`); `/jev-stats` aggregates it per hook.
+- **Explainable enforcement.** Every `ask`/`deny` carries a human-readable reason with the full evidence summary (`jev-guard: 中风险调用，需人工确认（risk=medium 0.72 · irrev=0.30 · inj=0.01）`) straight into the approval card and the denied tool result. The `jev-guard:` prefix is a safety protocol — the pre-approver refuses to auto-approve its sibling's escalations.
+- **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`), with `callId` correlation and full-precision `scores` for calibration replays; the log rotates at 20 MB. `/jev-stats` aggregates per hook, `/jev-log` shows per-decision detail, and the Web panel charts it all.
+- **Calibratable, not guessed.** `/jev-calibrate` replays your shadow telemetry through the *same* decision matrix and suggests threshold moves (±0.05 steps, ≥30 samples for routine moves — ≥10 once a mis-approval danger signal appears, tighten-only; injection thresholds never relaxed, nothing auto-applied).
 
-All of this is enforced by **77 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
+All of this is enforced by **130 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
 
 ## Configure
 
@@ -97,6 +101,15 @@ Everything is a config field — timeouts, cooldown, concurrency, cache, per-hoo
 - read-only tools (`read`, `read_image`, `grep`, `glob`, `todo_write`) short-circuit with **zero cost**;
 - the Auto permission preset is left entirely to `auto-review` (no double review, no double billing);
 - the pre-approval allowlist starts **empty** — until you name tools in `preapproveToolAllowlist`, nothing is ever auto-approved.
+
+**Stagnation detection** (v0.5, opt-in, default off) — dsh's repeat-tool-reminder only catches *exact* repeats; a doomed retry loop that varies its arguments is invisible to it. When the same tool fails ≥4 times with different arguments, one Jev fan-out judges "no progress + same failure mode"; on high confidence (enforce mode only — shadow logs the would-be alert in telemetry) a plugin-notice reminder tells the agent to stop and change strategy (observe-and-enrich — never vetoes a result):
+
+```yaml
+    stagnationEnabled: true        # default false
+    stagnationTriggerCount: 4      # failed varied attempts before judging
+    stagnationConfidenceMin: 0.85  # both nouls must clear this to alert
+    stagnationCooldownMs: 300000   # one alert per 5 minutes per tool
+```
 
 Semantic session retention lives on its own row (disabled and byte-for-byte stock until you arm it):
 
@@ -123,16 +136,15 @@ The client speaks the plain `state + questions` wire shape shared by TypeSafe di
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
 npm run typecheck                # src + tests, against real @deepseek-ai types
-npm test                         # vitest, 77 tests, no network
+npm test                         # vitest, 130 tests, no network
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # one real decision against a live provider
 ```
 
 ## Roadmap
 
-The approval loop (v0.1) and semantic session retention (v0.2) are in. The verified next frontiers — where selection, not just safety, meets System-1 ([full catalog](docs/jev-usage-points.md)):
+The approval loop (v0.1), semantic session retention (v0.2), image-offload pre-planning (v0.4), and stagnation detection (v0.5) are in. The verified next frontiers — where selection, not just safety, meets System-1 ([full catalog](docs/jev-usage-points.md)):
 
-- **Image-offload pre-planning** — dsh's own README admits "nothing plans an offload before dispatch"; Jev plans it
 - **Content-aware model routing** — routine steps on the cheap route, deep work on the strong one
 - **Worker-report verification** — when a subagent says "done", something checks
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decideGuard, decidePreapprove, type GuardAnswers, type GuardThresholds } from '../src/matrix.js'
+import { decideGuard, decidePreapprove, guardEvidence, type GuardAnswers, type GuardThresholds } from '../src/matrix.js'
 
 const thresholds: GuardThresholds = {
   confidenceMin: 0.6,
@@ -39,6 +39,7 @@ describe('decideGuard', () => {
     const decision = decideGuard(medium, thresholds)
     expect(decision.kind).toBe('ask')
     expect(decision.kind === 'ask' && decision.reason.startsWith('jev-guard:')).toBe(true)
+    expect(decision.kind === 'ask' && decision.reason.includes('risk=medium 0.80')).toBe(true)
   })
 
   it('delegates on low-confidence medium risk (no basis to escalate)', () => {
@@ -62,13 +63,30 @@ describe('decideGuard', () => {
     const decision = decideGuard(high, thresholds)
     expect(decision.kind).toBe('deny')
     expect(decision.kind === 'deny' && decision.reason.startsWith('jev-guard:')).toBe(true)
+    expect(decision.kind === 'deny' && decision.reason.includes('risk=high 0.90')).toBe(true)
   })
 
   it('escalates regardless of risk when injection is suspected', () => {
     const injected = answers({ injectionSuspect: { type: 'noul', noul: 0.9 } })
     const decision = decideGuard(injected, thresholds)
     expect(decision.kind).toBe('ask')
-    expect(decision.kind === 'ask' && decision.reason.includes('injection')).toBe(true)
+    expect(decision.kind === 'ask' && decision.reason.includes('注入')).toBe(true)
+    expect(decision.kind === 'ask' && decision.reason.includes('inj=0.90')).toBe(true)
+  })
+})
+
+describe('guardEvidence', () => {
+  it('renders risk probability from the chosen option, falling back to confidence', () => {
+    const medium = answers({ risk: { type: 'choice', choice: 'medium', probabilities: { low: 0.1, medium: 0.72, high: 0.18 }, confidence: 0.6 } })
+    expect(guardEvidence(medium)).toContain('risk=medium 0.72')
+    const noProbs = answers({ risk: { type: 'choice', choice: 'high', probabilities: {}, confidence: 0.88 } })
+    expect(guardEvidence(noProbs)).toContain('risk=high 0.88')
+  })
+
+  it('omits task evidence while it agrees with the call and surfaces it below 0.5', () => {
+    expect(guardEvidence(answers()).includes('task=')).toBe(false)
+    const offTask = answers({ matchesTask: { type: 'noul', noul: 0.12 } })
+    expect(guardEvidence(offTask)).toContain('task=0.12')
   })
 })
 
@@ -91,7 +109,9 @@ describe('decidePreapprove', () => {
   })
 
   it('blocks on scope doubt', () => {
-    expect(decidePreapprove(pre({ withinGrantedScope: { type: 'noul', noul: 0.6 } }), thresholds).kind).toBe('human')
+    const verdict = decidePreapprove(pre({ withinGrantedScope: { type: 'noul', noul: 0.6 } }), thresholds)
+    expect(verdict.kind).toBe('human')
+    expect(verdict.kind === 'human' && verdict.reason.includes('范围置信度 0.60')).toBe(true)
   })
 
   it('blocks on irreversibility at or above the ceiling', () => {

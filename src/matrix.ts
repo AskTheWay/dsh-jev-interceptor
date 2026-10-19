@@ -50,6 +50,27 @@ function p(value: number): string {
 }
 
 /**
+ * 把一组已校验的 guard 答案压成用户可读的证据摘要。
+ *
+ * 该摘要同时服务三个面：审批卡标题（ask reason）、工具错误行（deny reason）
+ * 与遥测 detail 的快速人读。格式与 guard 的 answerDetail token 对齐
+ * （risk/irrev/task/inj），保持 ASCII 数值 token 可机读。
+ * @param answers - 四个 guard 问题的已校验答案。
+ * @returns 形如 `risk=medium 0.72 · irrev=0.30 · inj=0.01` 的摘要；
+ *   matchesTask.noul < 0.5（不利证据）时追加 ` · task=0.12`。
+ */
+export function guardEvidence(answers: GuardAnswers): string {
+  const { risk, irreversible, matchesTask, injectionSuspect } = answers
+  const parts = [
+    `risk=${risk.choice} ${p(risk.probabilities[risk.choice] ?? risk.confidence)}`,
+    `irrev=${p(irreversible.noul)}`,
+    `inj=${p(injectionSuspect.noul)}`,
+  ]
+  if (matchesTask.noul < 0.5) parts.push(`task=${p(matchesTask.noul)}`)
+  return parts.join(' · ')
+}
+
+/**
  * Resolve one answer set into a guard action.
  * @param answers - validated Jev answers for the four guard questions.
  * @param thresholds - configured decision thresholds.
@@ -57,29 +78,32 @@ function p(value: number): string {
  */
 export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds): GuardAction {
   const { risk, irreversible, injectionSuspect } = answers
+  // 证据摘要统一附在中文结论后；reason 行首的 `jev-guard:` 前缀是安全协议
+  // （preapprove 靠它识别并跳过本插件的升级，绝不自动批 guard 的 ask），不可移除。
+  const evidence = guardEvidence(answers)
   if (injectionSuspect.noul >= thresholds.injectionAskThreshold) {
     return {
       kind: 'ask',
-      reason: `jev-guard: possible prompt injection in tool input (p=${p(injectionSuspect.noul)})`,
+      reason: `jev-guard: 工具输入疑似提示注入，升级人工确认（${evidence}）`,
     }
   }
   if (risk.choice === 'high') {
     if (risk.confidence >= thresholds.denyConfidence && irreversible.noul >= thresholds.irreversibleDenyFloor) {
       return {
         kind: 'deny',
-        reason: `jev-guard: high-risk tool call (p=${p(risk.probabilities['high'] ?? risk.confidence)}, irreversible=${p(irreversible.noul)})`,
+        reason: `jev-guard: 高风险且不可逆，已拦截（${evidence}）`,
       }
     }
     return {
       kind: 'ask',
-      reason: `jev-guard: high-risk classification (p=${p(risk.probabilities['high'] ?? risk.confidence)}) needs human confirmation`,
+      reason: `jev-guard: 高风险调用，需人工确认（${evidence}）`,
     }
   }
   if (risk.choice === 'medium') {
     if (risk.confidence < thresholds.confidenceMin) return { kind: 'delegate' }
     return {
       kind: 'ask',
-      reason: `jev-guard: medium-risk tool call (p=${p(risk.probabilities['medium'] ?? risk.confidence)})`,
+      reason: `jev-guard: 中风险调用，需人工确认（${evidence}）`,
     }
   }
   // risk.choice === 'low': low confidence never acts either — it delegates to
@@ -88,7 +112,7 @@ export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds):
   if (irreversible.noul >= thresholds.irreversibleCeiling) {
     return {
       kind: 'ask',
-      reason: `jev-guard: low risk but possibly irreversible (p=${p(irreversible.noul)})`,
+      reason: `jev-guard: 风险低但可能不可逆，需人工确认（${evidence}）`,
     }
   }
   return { kind: 'delegate' }
@@ -99,9 +123,7 @@ export interface PreapproveAnswers {
   readonly withinGrantedScope: NoulAnswer
   readonly reversible: NoulAnswer
   readonly injectionSuspect: NoulAnswer
-}
-
-/** Tunable thresholds consumed by {@link decidePreapprove}. */
+}/** Tunable thresholds consumed by {@link decidePreapprove}. */
 export interface PreapproveThresholds {
   /** Minimum confidence on scope/reversibility to auto-approve. */
   readonly autoApproveMin: number
@@ -127,17 +149,38 @@ export function decidePreapprove(
   thresholds: PreapproveThresholds,
 ): PreapproveVerdict {
   const { withinGrantedScope, reversible, injectionSuspect } = answers
+  // human reason 面向审批审计（落遥测 detail 后缀）；中文 + ASCII 数值 token，与 guard reason 同风格。
   if (injectionSuspect.noul >= thresholds.injectionSuspectMax) {
-    return { kind: 'human', reason: `injection suspicion ${p(injectionSuspect.noul)} at or above ${thresholds.injectionSuspectMax}` }
+    return { kind: 'human', reason: `注入疑似 ${p(injectionSuspect.noul)} 达到阈值 ${thresholds.injectionSuspectMax}` }
   }
   if (withinGrantedScope.noul < thresholds.autoApproveMin) {
-    return { kind: 'human', reason: `scope confidence ${p(withinGrantedScope.noul)} below ${thresholds.autoApproveMin}` }
+    return { kind: 'human', reason: `范围置信度 ${p(withinGrantedScope.noul)} 低于 ${thresholds.autoApproveMin}` }
   }
   if (reversible.noul < thresholds.autoApproveMin) {
-    return { kind: 'human', reason: `reversibility confidence ${p(reversible.noul)} below ${thresholds.autoApproveMin}` }
+    return { kind: 'human', reason: `可逆置信度 ${p(reversible.noul)} 低于 ${thresholds.autoApproveMin}` }
   }
   if (1 - reversible.noul >= thresholds.irreversibleMax) {
-    return { kind: 'human', reason: `irreversibility ${p(1 - reversible.noul)} at or above ${thresholds.irreversibleMax}` }
+    return { kind: 'human', reason: `不可逆度 ${p(1 - reversible.noul)} 达到阈值 ${thresholds.irreversibleMax}` }
   }
   return { kind: 'auto-approve' }
+}
+
+/** The Jev answers the stagnation questions produce. */
+export interface StagnationAnswers {
+  readonly noProgress: NoulAnswer
+  readonly similarFailure: NoulAnswer
+}
+
+/**
+ * Resolve one stagnation answer set into a verdict.
+ *
+ * 双 noul 都要过置信门才提醒（换参数失败可能是正常的逐步排错，单边证据
+ * 不足以打断）；任一边低置信即跳过——提醒是干预性动作，宁可漏报不误报。
+ * @param answers - validated Jev answers for the two stagnation questions.
+ * @param confidenceMin - both answers must reach this probability to alert.
+ * @returns `alert`（注入提醒）或 `skip`（只记遥测）。
+ */
+export function decideStagnation(answers: StagnationAnswers, confidenceMin: number): 'alert' | 'skip' {
+  if (answers.noProgress.noul >= confidenceMin && answers.similarFailure.noul >= confidenceMin) return 'alert'
+  return 'skip'
 }

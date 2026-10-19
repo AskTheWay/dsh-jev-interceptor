@@ -15,13 +15,15 @@ dsh 是 everything-is-a-plugin 的 Cordis harness：每个判断点都是异步�
 
 ## 判断点清单
 
-### 本插件（v0.1–v0.2）——审批闭环 + 会话保留
+### 本插件（v0.1–v0.5）——审批闭环 + 会话保留 + 卸载预规划 + 停滞检测
 
 | # | 判断点 | 现状 | Jev 的角色 | 适配 |
 |---|---|---|---|---|
 | 1 | **工具调用风险门** — `tools/pre-execute`（`core/tools/src/index.ts:146`，派发 `:1482-1505`） | 瀑布兜底就是 `allow`，出厂组合没有任何逐调用分类器；唯一先例 `experimental/auto-review` 用*生成式* LLM + temperature 0 + 手写 JSON 文本协议做低/中/高三分类 | 每次调用一次 fan-out：risk `choice` + irreversible / matches-task / injection-suspect `noul`。高置信+不可逆 → deny；中风险 → ask；低风险 → 委托 | 🟢 |
 | 2 | **审批预答** — `approval/request`（`user-approval/src/types.ts:85-89`） | 只有人工 answerer（Web UI / ACP 桥），每次 `ask` 都耗一次人工往返 | 链上第一 answerer：within-granted-scope + reversible 双 `noul`；仅对白名单工具高置信时自动批，否则转人工 | 🟢 |
 | 3 | **会话快照保留**（v0.2）— `session-reference/src/projection.ts:93-128` | FIFO 丢弃 + 最长优先截断，零语义 | 子类化 resolver，一次 fan-out 给每条可丢弃消息打分（*噪音→关键*）；最没价值先丢、截断先砍废话；关闭/shadow 模式逐字节等同上游 | 🟢 |
+| 8 | **图像卸载预规划**（v0.4）— `compaction-image-offload`（README 自认"nothing plans an offload before dispatch"） | 失败请求后 FIFO 卸载 | 请求前逐图残余价值 `score`，只卸高置信可牺牲的图 | 🟢 |
+| 10 | **语义停滞检测**（v0.5）— `tools/post-execute`（repeat-tool-reminder 只覆盖精确重复） | 精确匹配检测，换参数的循环不可见 | 有界失败窗口内"无进展 + 同类失败"双 `noul`；高置信注入一条提醒让 agent 换路（observe-and-enrich，绝不否决结果） | 🟡 |
 
 挂点 1+2 是同一个闭环：出厂组合没有内置 `ask` 源，审批流量大部分正是风险门自己升级上去的。
 
@@ -33,9 +35,7 @@ dsh 是 everything-is-a-plugin 的 Cordis harness：每个判断点都是异步�
 | 5 | **子代理模型默认档** — `tool-subagent/src/model-selection.ts:99` | 模型省略时静默继承父路由 | 子代理首步按 delegation prompt 做一次 `choice` | 🟢 |
 | 6 | **Ralph 工人报告核验** — `workflow/tool-ralph/src/index.ts:281-331` | 脚本自己的注释承认"Completion and blockers are worker reports, not independent evaluation"（`:408`）；status 完全靠工人自报 | 对有界报告（16k 字符硬上限）做 confirm / overturn `choice` | 🟢 |
 | 7 | **Goal 续轮进展判断** — `goal-round-driver/src/index.ts:164-192` | `roundsStarted < maxGoalRounds` 无条件续轮，零进展判断 | objective + 上轮输出 → 进展 `score` + continue `noul` | 🟢 |
-| 8 | **图像卸载预规划** — `compaction-image-offload`（README 自认"nothing plans an offload before dispatch"） | 失败请求后 FIFO 卸载 | 请求前逐图残余价值 `score`，只卸高置信可牺牲的图 | 🟢 |
 | 9 | **溢出预览档位** — `spill/spill-policy/src/index.ts:197-220` | 固定字节预算头尾预览 | 按任务价值 `choice` 档位（tiny/short/standard/generous）；必须保留不超 cap、绝不 isError 不变量 | 🟡 |
-| 10 | **语义停滞检测** — `tools/post-execute`（repeat-tool-reminder 只覆盖精确重复） | 精确匹配检测，换参数的循环不可见 | 有界失败窗口内"跨不同尝试无进展" `noul` | 🟡 |
 | 11 | **检索重排** — `session-query-sqlite/src/index.ts:670-707` | FTS5 match_count 排序，无语义 | query×snippet 相关度 `score`，仅页内重排（分页确定性） | 🟡 |
 | 12 | **计划就绪预检** — `plan-mode/src/index.ts:295-348` | 人工 approve / keep planning | 提交评审前 complete/needs-revision 预检，减少无效评审往返（人类保留最终批准权） | 🟡 |
 | 13 | **沙箱提级必要性** — `sandbox/src/escalation.ts:153-186` | 变宽表 + 一句话理由 + 人工 | "该提级是否必要且最小" `noul` 预检 answerer | 🟡 |

@@ -1,6 +1,6 @@
 {
   "name": "dsh-jev-interceptor",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Millisecond System-1 judgement for every tool call in DeepSeek Harness: Jev-powered risk classification and evidence-gated auto-approval, fail-closed by construction.",
   "type": "module",
   "main": "lib/index.js",
@@ -70,6 +70,7 @@
     "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-home-paths": "*",
     "@deepseek-ai/dsh-launch-environment": "*",
+    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-output-retention": "*",
     "@deepseek-ai/dsh-session-query": "*",
     "@deepseek-ai/dsh-session-reference": "*",

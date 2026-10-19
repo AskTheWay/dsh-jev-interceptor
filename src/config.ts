@@ -92,6 +92,21 @@ export interface Config {
   imageOffloadSacrificeScoreMax?: number
   /** Sacrificial probability floor [0,1] (default 0.8). */
   imageOffloadSacrificeProbMin?: number
+
+  /** 停滞检测（换参数死循环）总开关；默认关（照 imageOffloadEnabled 的 opt-in 先例）。 */
+  stagnationEnabled?: boolean
+  /** 每 (agent, 工具) 失败窗口容量（默认 8）。 */
+  stagnationWindow?: number
+  /** 窗口内失败次数达到该值才考虑发起 Jev 判断（默认 4）。 */
+  stagnationTriggerCount?: number
+  /** 窗口内失败占比下限 [0,1]（默认 0.75；成功即清空语义下是显式安全门）。 */
+  stagnationFailureRatioMin?: number
+  /** Jev 双 noul 判定「无进展」的行动置信门 [0,1]（默认 0.85）。 */
+  stagnationConfidenceMin?: number
+  /** 同一 (agent, 工具) 两次停滞提醒的最小间隔毫秒（默认 5 分钟）。 */
+  stagnationCooldownMs?: number
+  /** 进 Jev state 的参数预览长度（字符，默认 160）。 */
+  stagnationArgsPreviewChars?: number
 }
 
 /** Read-only dsh tool names (verified against the dsh tool registry) that never need classification. */
@@ -131,6 +146,13 @@ export const DEFAULTS = {
   preapproveAutoApproveMin: 0.85,
   preapproveIrreversibleMax: 0.15,
   preapproveInjectionSuspectMax: 0.5,
+  stagnationEnabled: false,
+  stagnationWindow: 8,
+  stagnationTriggerCount: 4,
+  stagnationFailureRatioMin: 0.75,
+  stagnationConfidenceMin: 0.85,
+  stagnationCooldownMs: 300_000,
+  stagnationArgsPreviewChars: 160,
 } as const
 
 export const Config: z<Config> = z.object({
@@ -173,6 +195,14 @@ export const Config: z<Config> = z.object({
   imageOffloadMinCandidates: z.number().step(1).min(1).default(3),
   imageOffloadSacrificeScoreMax: z.number().min(0).max(1).default(0.33),
   imageOffloadSacrificeProbMin: z.number().min(0).max(1).default(0.8),
+
+  stagnationEnabled: z.boolean().default(DEFAULTS.stagnationEnabled),
+  stagnationWindow: z.number().step(1).min(2).max(32).default(DEFAULTS.stagnationWindow),
+  stagnationTriggerCount: z.number().step(1).min(2).max(16).default(DEFAULTS.stagnationTriggerCount),
+  stagnationFailureRatioMin: z.number().min(0.5).max(1).default(DEFAULTS.stagnationFailureRatioMin),
+  stagnationConfidenceMin: z.number().min(0.5).max(1).default(DEFAULTS.stagnationConfidenceMin),
+  stagnationCooldownMs: z.number().step(1).min(30_000).default(DEFAULTS.stagnationCooldownMs),
+  stagnationArgsPreviewChars: z.number().step(1).min(16).max(1024).default(DEFAULTS.stagnationArgsPreviewChars),
 })
 
 /** Fully-defaulted settings, the one resolved shape the rest of the plugin consumes. */
@@ -202,6 +232,13 @@ export interface ResolvedSettings {
   readonly preapproveAutoApproveMin: number
   readonly preapproveIrreversibleMax: number
   readonly preapproveInjectionSuspectMax: number
+  readonly stagnationEnabled: boolean
+  readonly stagnationWindow: number
+  readonly stagnationTriggerCount: number
+  readonly stagnationFailureRatioMin: number
+  readonly stagnationConfidenceMin: number
+  readonly stagnationCooldownMs: number
+  readonly stagnationArgsPreviewChars: number
   readonly apiKeyEnv: string
 }
 
@@ -241,6 +278,13 @@ export function resolveSettings(config: Config): ResolvedSettings {
     preapproveAutoApproveMin: config.preapproveAutoApproveMin ?? DEFAULTS.preapproveAutoApproveMin,
     preapproveIrreversibleMax: config.preapproveIrreversibleMax ?? DEFAULTS.preapproveIrreversibleMax,
     preapproveInjectionSuspectMax: config.preapproveInjectionSuspectMax ?? DEFAULTS.preapproveInjectionSuspectMax,
+    stagnationEnabled: config.stagnationEnabled ?? DEFAULTS.stagnationEnabled,
+    stagnationWindow: config.stagnationWindow ?? DEFAULTS.stagnationWindow,
+    stagnationTriggerCount: config.stagnationTriggerCount ?? DEFAULTS.stagnationTriggerCount,
+    stagnationFailureRatioMin: config.stagnationFailureRatioMin ?? DEFAULTS.stagnationFailureRatioMin,
+    stagnationConfidenceMin: config.stagnationConfidenceMin ?? DEFAULTS.stagnationConfidenceMin,
+    stagnationCooldownMs: config.stagnationCooldownMs ?? DEFAULTS.stagnationCooldownMs,
+    stagnationArgsPreviewChars: config.stagnationArgsPreviewChars ?? DEFAULTS.stagnationArgsPreviewChars,
     apiKeyEnv: config.apiKeyEnv ?? DEFAULTS.apiKeyEnv,
   }
 }

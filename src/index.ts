@@ -44,6 +44,8 @@ const jevOffDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-of
 const jevModeDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-mode' as CommandDefinitionIdBrand
 const jevStatusDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-status' as CommandDefinitionIdBrand
 const jevKeyDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-key' as CommandDefinitionIdBrand
+const jevCalibrateDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-calibrate' as CommandDefinitionIdBrand
+const jevLogDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-log' as CommandDefinitionIdBrand
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import {
   Config,
@@ -52,6 +54,7 @@ import {
   resolveEndpoint,
   resolveSettings,
   type LiveSettings,
+  type ResolvedSettings,
 } from './config.js'
 import { JevClient } from './jev.js'
 import { Telemetry } from './telemetry.js'
@@ -59,7 +62,11 @@ import { createGuardListener, PendingAsks } from './guard.js'
 import { createPreapproveListener } from './preapprove.js'
 import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
+import { createStagnationListener, StagnationTracker, type StagnationThresholds } from './stagnation.js'
 import { registerJevApi } from './jev-api.js'
+import { calibrate, renderCalibration, type CalibrationReport, type ThresholdsInput } from './calibrate.js'
+import { parseLogArgs, renderLogTable, toLogCsv, toLogJson } from './telemetry.js'
+import { join } from 'node:path'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-jev-interceptor'
@@ -81,8 +88,27 @@ export { Telemetry } from './telemetry.js'
 export type { TelemetryEntry, DecisionTag, DecisionAction } from './telemetry.js'
 export { noul, choice, score } from './types.js'
 export type { NoulQuestion, ChoiceQuestion, ScoreQuestion, JevQuestion, JevAnswers } from './types.js'
-export { decideGuard, decidePreapprove } from './matrix.js'
+export { decideGuard, decidePreapprove, decideStagnation } from './matrix.js'
+export type { GuardAction, GuardThresholds, PreapproveVerdict, PreapproveThresholds, StagnationAnswers } from './matrix.js'
 export { CooldownGate, Semaphore, LruCache } from './resilience.js'
+export { createStagnationListener, StagnationTracker, shouldProbe, summarizeFailure } from './stagnation.js'
+export type { AttemptRecord, StagnationThresholds, StagnationDeps } from './stagnation.js'
+export { calibrate, renderCalibration } from './calibrate.js'
+export type { CalibrationReport, ThresholdAdvice, CalibrationNote, ThresholdKey, ThresholdsInput, GuardScoreSample, PreapproveScoreSample } from './calibrate.js'
+
+/** 从已解析设置提取阈值子集（校准基线，与挂点同源）。 */
+function thresholdsOf(s: ResolvedSettings): ThresholdsInput {
+  return {
+    guardConfidenceMin: s.guardConfidenceMin,
+    guardDenyConfidence: s.guardDenyConfidence,
+    guardIrreversibleCeiling: s.guardIrreversibleCeiling,
+    guardIrreversibleDenyFloor: s.guardIrreversibleDenyFloor,
+    guardInjectionAskThreshold: s.guardInjectionAskThreshold,
+    preapproveAutoApproveMin: s.preapproveAutoApproveMin,
+    preapproveIrreversibleMax: s.preapproveIrreversibleMax,
+    preapproveInjectionSuspectMax: s.preapproveInjectionSuspectMax,
+  }
+}
 
 /**
  * Mount the guard and pre-approval hooks, the shared Jev client, telemetry,
@@ -176,19 +202,27 @@ export function apply(ctx: Context, config: Config): void {
         keySource: cfg.apiKey !== undefined && cfg.apiKey.length > 0 ? 'config' : 'env',
         guardEnabled: settings.guardEnabled,
         preapproveEnabled: settings.preapproveEnabled,
+        stagnationEnabled: settings.stagnationEnabled,
       }
     },
     getStats: () => telemetry.statsData(200),
+    // 校准基线用与四个挂点同一份 settings 快照：报告的「当前值」= 实际执行值。
+    getCalibration: async (): Promise<CalibrationReport> => calibrate(await telemetry.entries(2000), thresholdsOf(settings)),
+    getLog: (limit) => telemetry.recentEntries(limit),
     updateConfig: async (patch) => {
-      const settingsService = ctx.get('settings')
-      if (settingsService !== undefined && typeof settingsService.update === 'function') {
-        await settingsService.update(SETTINGS_NS, patch)
-      } else {
-        // Fallback: apply in-memory for this run.
-        if (typeof patch['enabled'] === 'boolean') liveOverride = { ...live(), enabled: patch['enabled'] }
-        if (patch['mode'] === 'shadow' || patch['mode'] === 'enforce') liveOverride = { ...live(), mode: patch['mode'] }
-        if (typeof patch['apiKey'] === 'string') configOverride = { ...(configOverride ?? config), apiKey: patch['apiKey'] }
-      }
+      // 先立即更新内存（getStatus 立刻能看到，无论 settings 服务是否存在）
+      if (typeof patch['enabled'] === 'boolean') liveOverride = { ...live(), enabled: patch['enabled'] }
+      if (patch['mode'] === 'shadow' || patch['mode'] === 'enforce') liveOverride = { ...live(), mode: patch['mode'] }
+      if (typeof patch['provider'] === 'string') configOverride = { ...(configOverride ?? config), provider: patch['provider'] as Config['provider'] }
+      if (typeof patch['endpoint'] === 'string') configOverride = { ...(configOverride ?? config), endpoint: patch['endpoint'] }
+      if (typeof patch['apiKey'] === 'string') configOverride = { ...(configOverride ?? config), apiKey: patch['apiKey'] }
+      // 再尽力持久化（失败不影响本次运行）
+      try {
+        const settingsService = ctx.get('settings')
+        if (settingsService !== undefined && typeof settingsService.update === 'function') {
+          await settingsService.update(SETTINGS_NS, patch)
+        }
+      } catch { /* 内存已更新，持久化失败仅影响重启后 */ }
     },
   })
   })
@@ -253,6 +287,27 @@ export function apply(ctx: Context, config: Config): void {
     }))
   }
 
+  // Stagnation detection (opt-in): 换参数死循环检测。observe-and-enrich 形态
+  // （照 repeat-tool-reminder）：不拦截不否决，高置信无进展时注入一条提醒。
+  if (settings.stagnationEnabled) {
+    const stagnationThresholds: StagnationThresholds = {
+      triggerCount: settings.stagnationTriggerCount,
+      failureRatioMin: settings.stagnationFailureRatioMin,
+      cooldownMs: settings.stagnationCooldownMs,
+    }
+    const stagnation = createStagnationListener({
+      live,
+      tracker: new StagnationTracker(settings.stagnationWindow),
+      thresholds: stagnationThresholds,
+      confidenceMin: settings.stagnationConfidenceMin,
+      argsPreviewChars: settings.stagnationArgsPreviewChars,
+      jev,
+      telemetry,
+    })
+    ctx.on('tools/post-execute', stagnation.onPostExecute)
+    ctx.on('agent/pre-step', stagnation.onPreStep)
+  }
+
   // Approval data loop: durable asked/decided audit events correlate with
   // pre-approval verdicts, so shadow mode accumulates the agreement dataset
   // (headline: asks Jev would auto-approve but the human rejected).
@@ -299,6 +354,37 @@ export function apply(ctx: Context, config: Config): void {
       },
     })
     void commandsCtx.commands.register({
+      definitionId: jevCalibrateDefinitionId,
+      name: 'jev-calibrate',
+      description: '分析影子遥测，输出阈值调整建议（默认最近 2000 条，--all 全量）',
+      input: { hint: '[--all]' },
+      handler: async (invocation): Promise<CommandResult> => {
+        const full = invocation.rawInput.includes('--all')
+        const entries = await telemetry.entries(full ? undefined : 2000)
+        return { kind: 'success', text: renderCalibration(calibrate(entries, thresholdsOf(settings))) }
+      },
+    })
+    void commandsCtx.commands.register({
+      definitionId: jevLogDefinitionId,
+      name: 'jev-log',
+      description: '查看最近 n 条决策明细（默认 20；--json/--csv 导出原始数据）',
+      input: { hint: '[n] [--json|--csv]' },
+      handler: async (invocation): Promise<CommandResult> => {
+        const args = parseLogArgs(invocation.rawInput)
+        const entries = await telemetry.recentEntries(args.n)
+        if (entries.length === 0) {
+          return { kind: 'success', text: '```\n⚡ dsh-jev-interceptor\n\n  暂无决策记录\n\n  运行 /jev-on 启用插件后再查看\n```' }
+        }
+        if (args.format === 'json') {
+          return { kind: 'success', text: '```json\n' + toLogJson(entries) + '\n```' }
+        }
+        if (args.format === 'csv') {
+          return { kind: 'success', text: '```\n' + toLogCsv(entries) + '\n```' }
+        }
+        return { kind: 'success', text: renderLogTable(entries, join(settings.telemetryDir, 'telemetry.jsonl')) }
+      },
+    })
+    void commandsCtx.commands.register({
       definitionId: jevStatusDefinitionId,
       name: 'jev-status',
       description: '查看 Jev 插件当前状态',
@@ -311,11 +397,11 @@ export function apply(ctx: Context, config: Config): void {
           `  模式   ${s.mode}${s.mode === 'shadow' ? '（只记录）' : '（执行决策）'}`,
           `  源     ${config.provider ?? 'typesafe'}`,
           `  模型   ${model}`,
-          `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}`,
+          `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}  停滞 ${settings.stagnationEnabled ? '✅' : '❌'}`,
           `  Key    ${config.apiKey !== undefined && config.apiKey.length > 0 ? '✅ 已配置' : (await resolveKey()) !== undefined ? '✅ 环境变量' : '❌ 未配置（运行 /jev-key <key>）'}`,
           settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
           '  控制: /jev-on /jev-off /jev-mode',
-          '  统计: /jev-stats',
+          '  统计: /jev-stats │ 明细: /jev-log │ 校准: /jev-calibrate',
           '```',
         ].filter(line => line.length > 0).join('\n')
         return { kind: 'success', text }
