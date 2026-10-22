@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -8,8 +8,19 @@ async function withLog(entries: readonly TelemetryEntry[]): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-tel-'))
   const telemetry = new Telemetry(dir)
   for (const entry of entries) telemetry.record(entry)
-  // Fire-and-forget writes need one macrotask to land.
-  await new Promise((resolve) => setTimeout(resolve, 50))
+  // Fire-and-forget 写入需要落盘：轮询等全部行可见（固定等待在高负载下偶发不足）。
+  const file = join(dir, 'telemetry.jsonl')
+  const deadline = Date.now() + 2_000
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    try {
+      const raw = await readFile(file, 'utf8')
+      if (raw.split('\n').filter(line => line.length > 0).length >= entries.length) break
+    } catch {
+      // 文件尚未创建：继续等。
+    }
+    if (Date.now() > deadline) break
+  }
   const text = await telemetry.stats()
   await rm(dir, { recursive: true, force: true })
   return text

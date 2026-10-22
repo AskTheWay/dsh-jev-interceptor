@@ -84,6 +84,14 @@ export interface CalibrationReport {
   readonly advice: readonly ThresholdAdvice[]
   readonly insufficient: readonly CalibrationNote[]
   readonly observations: readonly CalibrationNote[]
+  /** 与上一份快照的对比摘要（无历史时 undefined）；详情行由调用方渲染。 */
+  readonly history?: {
+    readonly previousTs: string
+    readonly adopted: number
+    readonly ignored: number
+    /** 手动改到建议之外的条数（面板徽章防"建议消失"）。 */
+    readonly manual: number
+  }
 }
 
 // ── 规则常量（全部可在一处调整）──────────────────────────────────────────
@@ -322,7 +330,8 @@ export function replayPreapprove(samples: readonly PreapproveScoreSample[], thre
 
 // ── 一致率桶提取（与 telemetry.foldInto 的 detail 匹配同法）──────────────
 
-function approvalBucketsOf(entries: readonly TelemetryEntry[]): Record<Bucket, number> {
+/** 提取一致率桶计数（approval-loop 的 detail token 匹配；历史对比与报告共用）。 */
+export function approvalBucketsOf(entries: readonly TelemetryEntry[]): Record<Bucket, number> {
   const buckets = Object.fromEntries(BUCKETS.map(b => [b, 0])) as Record<Bucket, number>
   for (const entry of entries) {
     if (entry.tag !== 'approval-loop' || entry.action !== 'agreement') continue
@@ -571,9 +580,10 @@ const PARAM_LABELS: Readonly<Record<string, string>> = {
 /**
  * 渲染中文报告文本（自带 ``` 代码块包裹，风格与 Telemetry.stats 一致）。
  * @param report - calibrate 的输出。
+ * @param extras - 附加段行数组（如历史对比），插在结尾声明之前。
  * @returns 聊天友好的纯文本报告。
  */
-export function renderCalibration(report: CalibrationReport): string {
+export function renderCalibration(report: CalibrationReport, extras: readonly string[] = []): string {
   const lines: string[] = ['```']
   lines.push('🎯 dsh-jev-interceptor 阈值校准')
   lines.push('')
@@ -610,6 +620,10 @@ export function renderCalibration(report: CalibrationReport): string {
       const label = n.param === '—' ? '' : `${PARAM_LABELS[n.param] ?? n.param}：`
       lines.push(`   ${label}${n.reason}`)
     }
+  }
+  if (extras.length > 0) {
+    lines.push('')
+    lines.push(...extras)
   }
   lines.push('━'.repeat(44))
   lines.push('📌 本报告不自动应用。请人工确认后把建议值复制到')

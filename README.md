@@ -79,6 +79,16 @@ Use your agent normally. In shadow mode every decision lands in telemetry with i
 
 Happy with the numbers? Flip `mode: enforce`. That's the whole rollout plan — **shadow first, then trust, never guess**.
 
+## Receipts (real usage, not benchmarks)
+
+One month of dogfooding (2026-09-22 → 10-22, 14 active days, 6 sessions, 221 decisions — `/jev-impact` renders this from your own telemetry any time):
+
+- the pre-approve path never fired all month, so the mis-approval metric has **no samples yet** (0/0, honestly rendered as "无样本" rather than "0") — what *was* exercised: 2 uncertain calls escalated to the human, 0 high-risk calls missed
+- total decision cost: **$0.0041** (96,684 input tokens across 92 billed decisions; p50 1110ms, p95 1454ms)
+- 128 decisions degraded to stock behavior (no key for most of the window, 9 timeouts) at **zero behavioral cost** — the fail-closed posture doing exactly what it promises
+
+Calibration closes its own loop: every `/jev-calibrate` run snapshots the report; the next run tells you which of its previous suggestions you adopted (`✓ 已采纳`), ignored, or manually overrode (`↔`), and how the agreement buckets moved since.
+
 ## Safety model (the part you should actually read)
 
 - **Never `allow`.** "No objection" is expressed as `next()`, so downstream listeners (external hooks, auto-review) keep their veto.

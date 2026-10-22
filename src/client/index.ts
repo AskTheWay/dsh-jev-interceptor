@@ -12,7 +12,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import { JevPage } from './JevPage.tsx'
+import { JevPage, injectPanelCss } from './JevPage.tsx'
 import { JevPanelIcon } from './JevPanelIcon.tsx'
 
 export const NS = 'jevInterceptor'
@@ -22,6 +22,9 @@ export const PANEL_ID = 'jev-interceptor' as MainPanelId
 export const inject = ['slots', 'locale']
 
 export function apply(ctx: ClientContext): void {
+  // 样式注入（官方 client bundle 的 data-plugin-css 约定，幂等）：内联 style
+  // 没有 hover/focus/媒体查询能力，面板视觉层走真 CSS 类与主题 token。
+  injectPanelCss()
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main',
     key: PANEL_ID,

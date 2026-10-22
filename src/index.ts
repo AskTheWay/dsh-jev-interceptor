@@ -46,6 +46,7 @@ const jevStatusDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev
 const jevKeyDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-key' as CommandDefinitionIdBrand
 const jevCalibrateDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-calibrate' as CommandDefinitionIdBrand
 const jevLogDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-log' as CommandDefinitionIdBrand
+const jevImpactDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-impact' as CommandDefinitionIdBrand
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import {
   Config,
@@ -64,7 +65,15 @@ import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
 import { createStagnationListener, StagnationTracker, type StagnationThresholds } from './stagnation.js'
 import { registerJevApi } from './jev-api.js'
-import { calibrate, renderCalibration, type CalibrationReport, type ThresholdsInput } from './calibrate.js'
+import { approvalBucketsOf, calibrate, renderCalibration, type CalibrationReport, type ThresholdsInput } from './calibrate.js'
+import {
+  CalibrationHistory,
+  compareWithPrevious,
+  renderComparisonLines,
+  shouldAppend,
+  snapshotOf,
+} from './calibration-history.js'
+import { renderImpact, summarizeImpact, type ImpactSummary } from './impact.js'
 import { parseLogArgs, renderLogTable, toLogCsv, toLogJson } from './telemetry.js'
 import { join } from 'node:path'
 
@@ -93,8 +102,11 @@ export type { GuardAction, GuardThresholds, PreapproveVerdict, PreapproveThresho
 export { CooldownGate, Semaphore, LruCache } from './resilience.js'
 export { createStagnationListener, StagnationTracker, shouldProbe, summarizeFailure } from './stagnation.js'
 export type { AttemptRecord, StagnationThresholds, StagnationDeps } from './stagnation.js'
-export { calibrate, renderCalibration } from './calibrate.js'
-export type { CalibrationReport, ThresholdAdvice, CalibrationNote, ThresholdKey, ThresholdsInput, GuardScoreSample, PreapproveScoreSample } from './calibrate.js'
+export { calibrate, renderCalibration, approvalBucketsOf } from './calibrate.js'
+export { summarizeImpact, renderImpact } from './impact.js'
+export type { ImpactSummary } from './impact.js'
+export { CalibrationHistory, compareWithPrevious, shouldAppend, snapshotOf, renderComparisonLines } from './calibration-history.js'
+export type { CalibrationSnapshot, CalibrationComparison } from './calibration-history.js'
 
 /** 从已解析设置提取阈值子集（校准基线，与挂点同源）。 */
 function thresholdsOf(s: ResolvedSettings): ThresholdsInput {
@@ -122,6 +134,39 @@ export function apply(ctx: Context, config: Config): void {
   const telemetry = new Telemetry(settings.telemetryDir)
   const pendingAsks = new PendingAsks()
   const approvalTrace = new ApprovalTrace()
+
+  /**
+   * 生成一份校准报告并落一份快照：读上一份快照对比「上次建议 → 是否采纳
+   * → 桶变化」，再把本次快照追加进历史（5 分钟去抖）。命令与面板共用；
+   * 定义在 apply 内以闭包 telemetry 与 settings（与挂点同一实例）。
+   */
+  const buildCalibration = async (full: boolean): Promise<{ report: CalibrationReport; extras: string[] }> => {
+    const entries = await telemetry.entries(full ? undefined : 2000)
+    const thresholds = thresholdsOf(settings)
+    const report = calibrate(entries, thresholds)
+    const buckets = approvalBucketsOf(entries)
+    const history = new CalibrationHistory(settings.telemetryDir)
+    const recentSnapshots = await history.recent(1)
+    const previous = recentSnapshots.at(-1)
+    // 传本次窗口大小：与上次口径不同（--all vs 尾窗）时桶变化不可比。
+    const comparison = compareWithPrevious(thresholds, previous, buckets, report.windowSize)
+    const snapshot = snapshotOf(report, thresholds, new Date().toISOString(), buckets)
+    if (shouldAppend(previous, snapshot)) history.append(snapshot)
+    return {
+      report: comparison.previousTs === undefined
+        ? report
+        : {
+          ...report,
+          history: {
+            previousTs: comparison.previousTs,
+            adopted: comparison.adopted.length,
+            ignored: comparison.ignored.length,
+            manual: comparison.manual.length,
+          },
+        },
+      extras: renderComparisonLines(comparison),
+    }
+  }
 
   // Live settings: the plugin Config is registered with the settings provider
   // so the Settings → Plugins page renders a form (provider, model, apiKey,
@@ -207,7 +252,10 @@ export function apply(ctx: Context, config: Config): void {
     },
     getStats: () => telemetry.statsData(200),
     // 校准基线用与四个挂点同一份 settings 快照：报告的「当前值」= 实际执行值。
-    getCalibration: async (): Promise<CalibrationReport> => calibrate(await telemetry.entries(2000), thresholdsOf(settings)),
+    // 每次生成都会与上一份快照对比（采纳/忽略/桶变化）并落一份新快照。
+    getCalibration: async (): Promise<CalibrationReport> => (await buildCalibration(false)).report,
+    // 面板每 20s 自动刷新会打这个端点：尾部窗口而非全量（/jev-impact 命令才是全量）。
+    getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
     getLog: (limit) => telemetry.recentEntries(limit),
     updateConfig: async (patch) => {
       // 先立即更新内存（getStatus 立刻能看到，无论 settings 服务是否存在）
@@ -360,8 +408,17 @@ export function apply(ctx: Context, config: Config): void {
       input: { hint: '[--all]' },
       handler: async (invocation): Promise<CommandResult> => {
         const full = invocation.rawInput.includes('--all')
-        const entries = await telemetry.entries(full ? undefined : 2000)
-        return { kind: 'success', text: renderCalibration(calibrate(entries, thresholdsOf(settings))) }
+        const { report, extras } = await buildCalibration(full)
+        return { kind: 'success', text: renderCalibration(report, extras) }
+      },
+    })
+    void commandsCtx.commands.register({
+      definitionId: jevImpactDefinitionId,
+      name: 'jev-impact',
+      description: '效果归因：省掉的审批点击、拦截、误批、成本与延迟（全量当前日志）',
+      handler: async (): Promise<CommandResult> => {
+        const entries = await telemetry.entries(undefined)
+        return { kind: 'success', text: renderImpact(summarizeImpact(entries)) }
       },
     })
     void commandsCtx.commands.register({
@@ -401,7 +458,7 @@ export function apply(ctx: Context, config: Config): void {
           `  Key    ${config.apiKey !== undefined && config.apiKey.length > 0 ? '✅ 已配置' : (await resolveKey()) !== undefined ? '✅ 环境变量' : '❌ 未配置（运行 /jev-key <key>）'}`,
           settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
           '  控制: /jev-on /jev-off /jev-mode',
-          '  统计: /jev-stats │ 明细: /jev-log │ 校准: /jev-calibrate',
+          '  统计: /jev-stats │ 明细: /jev-log │ 校准: /jev-calibrate │ 归因: /jev-impact',
           '```',
         ].filter(line => line.length > 0).join('\n')
         return { kind: 'success', text }

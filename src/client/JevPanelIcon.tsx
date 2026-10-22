@@ -62,11 +62,12 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
     }
   }, [])
 
+  // 状态点走官方主题变量：深色/浅色主题下都能与背景环形成对比。
   const dot = badge === null
     ? undefined
-    : !badge.enabled ? '#808080'
-      : badge.degraded > 0 ? '#fbbf24'
-        : '#4ade80'
+    : !badge.enabled ? 'var(--dsw-alias-label-secondary,#8a8a8a)'
+      : badge.degraded > 0 ? 'var(--dsw-alias-state-warn-primary,#d97706)'
+        : 'var(--dsw-alias-state-success-primary,#16a34a)'
   const title = badge === null ? 'Jev 决策'
     : 'Jev 决策 · '
       + (badge.enabled
@@ -101,7 +102,7 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
           height: dotSize,
           borderRadius: '50%',
           background: dot,
-          boxShadow: '0 0 0 1.5px rgba(0,0,0,.35)',
+          boxShadow: '0 0 0 1.5px var(--dsw-alias-bg-base,#000)',
         }} />
       )}
     </span>
