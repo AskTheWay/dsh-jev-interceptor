@@ -79,6 +79,19 @@ type RequestOutcome =
   | 'invalid-response'
   | { answers: JevAnswers; model: string; inputTokens: number | undefined; costUsd: number | undefined }
 
+/** 连接测试结果（错误码由展示层映射为中文）。 */
+export interface PingResult {
+  readonly ok: boolean
+  readonly latencyMs: number
+  /** Provider 报告的模型版本（成功时）。 */
+  readonly model?: string
+  /**
+   * `no-key` / `network` / `timeout` / `auth`(401/403) / `not-found`(404) /
+   * `rate-limited`(429——key 已通过认证) / `server`(5xx) / `invalid-response`。
+   */
+  readonly error?: string
+}
+
 /**
  * Bounded Jev caller with cache, cooldown, and concurrency control.
  */
@@ -194,6 +207,67 @@ export class JevClient {
       return result
     } finally {
       this.semaphore.release()
+    }
+  }
+
+  /**
+   * 连接测试：发一次最小真实请求验证 key、端点与模型。
+   *
+   * 刻意绕过缓存（测试就该真打）、冷却门（用户主动测试要立刻的答案）与
+   * 遥测（测试不是决策）；独立于 request() 实现——需要精确的 HTTP 状态码
+   * 区分「key 无效」与「端点不存在」，那是排障最关键的一刀。
+   * @param options - `apiKeyOverride`：用未保存的草稿 key 测试；`signal`：取消。
+   */
+  async ping(options: { apiKeyOverride?: string; signal?: AbortSignal } = {}): Promise<PingResult> {
+    const started = this.now()
+    const key = options.apiKeyOverride ?? await this.resolveKey()
+    if (key === undefined || key.length === 0) return { ok: false, latencyMs: 0, error: 'no-key' }
+    const timer = AbortSignal.timeout(this.timeoutMs)
+    const signal = options.signal === undefined ? timer : AbortSignal.any([options.signal, timer])
+    let response: Response
+    try {
+      response = await this.fetchFn(this.endpoint, {
+        method: 'POST',
+        headers: {
+          'authorization': `Bearer ${key}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.model,
+          state: { ping: 'connection-test' },
+          questions: {
+            ping: {
+              type: 'noul',
+              instructions: 'This is an API connectivity test. Reply with the probability that the input is an automated test message.',
+              criteria: {
+                true: 'It is an automated connectivity test',
+                false: 'It is not a test',
+              },
+            },
+          },
+        }),
+        signal,
+      })
+    } catch (error) {
+      const latencyMs = this.now() - started
+      if (options.signal?.aborted) return { ok: false, latencyMs, error: 'aborted' }
+      return { ok: false, latencyMs, error: timer.aborted || (error instanceof Error && error.name === 'AbortError') ? 'timeout' : 'network' }
+    }
+    const latencyMs = this.now() - started
+    if (response.status === 401 || response.status === 403) return { ok: false, latencyMs, error: 'auth' }
+    if (response.status === 404) return { ok: false, latencyMs, error: 'not-found' }
+    // 429 说明认证已通过（key 有效），只是限流——按成功上报，附注原因。
+    if (response.status === 429) return { ok: true, latencyMs, error: 'rate-limited' }
+    if (response.status >= 500) return { ok: false, latencyMs, error: 'server' }
+    if (!response.ok) return { ok: false, latencyMs, error: `http-${String(response.status)}` }
+    try {
+      const body: unknown = await response.json()
+      if (typeof body !== 'object' || body === null) return { ok: false, latencyMs, error: 'invalid-response' }
+      parseAnswers((body as Record<string, unknown>)['answers'])
+      const model = (body as Record<string, unknown>)['model']
+      return { ok: true, latencyMs, model: typeof model === 'string' ? model : this.model }
+    } catch {
+      return { ok: false, latencyMs, error: 'invalid-response' }
     }
   }
 

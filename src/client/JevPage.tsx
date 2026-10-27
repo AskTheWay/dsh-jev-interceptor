@@ -154,6 +154,42 @@ const KEY_SOURCE: Record<string, string> = {
   none: '未配置',
 }
 
+/** 连接测试结果（本地镜像宿主 PingResult）。 */
+interface PingResult {
+  ok: boolean
+  latencyMs: number
+  model?: string
+  error?: string
+}
+
+/** 连接测试错误码 → 中文（rate-limited 视为成功，key 已通过认证）。 */
+const PING_ERROR: Record<string, string> = {
+  'no-key': '未配置 API Key',
+  'network': '网络错误：无法连接端点',
+  'timeout': '超时：检查网络/代理，或端点响应过慢',
+  'auth': '认证失败：Key 无效或已过期',
+  'not-found': '端点不存在：检查 Provider 或 Base URL',
+  'rate-limited': 'Key 有效（当前限流中，稍后即可正常使用）',
+  'server': '服务端错误：Provider 侧问题',
+  'invalid-response': '响应格式异常：端点可能不是 Jev decisions API',
+}
+
+/** Key 脱敏：保留头 3 尾 4，中间打码；过短的 key 全打码。 */
+function maskKey(value: string): string {
+  const v = value.trim()
+  if (v.length <= 8) return '••••••••'
+  return `${v.slice(0, 3)}••••${v.slice(-4)}`
+}
+
+/** 连接测试结果的一行文案。 */
+function pingText(result: PingResult): string {
+  if (result.ok && result.error === undefined) {
+    return `连接正常${result.model !== undefined ? ` · ${result.model}` : ''} · ${String(result.latencyMs)}ms`
+  }
+  if (result.error === 'rate-limited') return `Key 有效（当前限流中）· ${String(result.latencyMs)}ms`
+  return `${PING_ERROR[result.error ?? ''] ?? `失败（${result.error ?? '未知错误'}）`} · ${String(result.latencyMs)}ms`
+}
+
 const TABS = [
   { id: 'overview', label: '概览' },
   { id: 'log', label: '决策记录' },
@@ -584,7 +620,12 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [calibBusy, setCalibBusy] = useState(false)
   const [keyDraft, setKeyDraft] = useState('')
+  // 保存成功后的脱敏展示：不清空输入栏，以掩码回填并锁定，「更换」解锁。
+  const [keyLocked, setKeyLocked] = useState(false)
+  const [keyMask, setKeyMask] = useState('')
   const [showKey, setShowKey] = useState(false)
+  const [pingBusy, setPingBusy] = useState(false)
+  const [pingResult, setPingResult] = useState<PingResult | null>(null)
   const [endpointDraft, setEndpointDraft] = useState('')
   const [filterAction, setFilterAction] = useState('all')
   const [filterMode, setFilterMode] = useState('all')
@@ -678,8 +719,33 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       return
     }
     const ok = await applyPatch('key', { apiKey: value }, { keyConfigured: true, keySource: 'config' })
-    if (ok) setKeyDraft('')
+    if (ok) {
+      // 输入栏不清空：以脱敏掩码回填并锁定，用户明确看到「配的是哪把钥匙」。
+      setKeyMask(maskKey(value))
+      setKeyDraft('')
+      setKeyLocked(true)
+      setPingResult(null)
+    }
   }, [keyDraft, applyPatch])
+
+  /** 连接测试：有未保存的草稿 key 先测草稿，否则测已配置的。 */
+  const runPing = useCallback(async (): Promise<void> => {
+    setPingBusy(true)
+    setPingResult(null)
+    try {
+      const draft = keyLocked || keyDraft.trim().length < 10 ? undefined : keyDraft.trim()
+      const response = await fetch(`${API}/test`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(draft === undefined ? {} : { apiKey: draft }),
+      })
+      setPingResult(await response.json() as PingResult)
+    } catch {
+      setPingResult({ ok: false, latencyMs: 0, error: 'network' })
+    } finally {
+      setPingBusy(false)
+    }
+  }, [keyDraft, keyLocked])
 
   const saveEndpoint = useCallback(async (): Promise<void> => {
     const value = endpointDraft.trim()
@@ -1061,32 +1127,65 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
             </div>
           </header>
           <div className="jev-field">
-            <label className="jev-field-label">{keySource === 'none' ? '粘贴你的 Jev API Key' : '覆盖已有 Key'}</label>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input
-                className="jev-input"
-                type={showKey ? 'text' : 'password'}
-                placeholder={keySource === 'none' ? '至少 10 个字符' : '输入新值以覆盖'}
-                value={keyDraft}
-                onChange={event => { setKeyDraft(event.target.value) }}
-                onKeyDown={event => {
-                  if (event.key !== 'Enter') return
-                  void saveKey()
-                }}
-              />
+            <label className="jev-field-label">
+              {keyLocked ? '当前使用的 Key（已脱敏）' : keySource === 'none' ? '粘贴你的 Jev API Key' : '覆盖已有 Key'}
+            </label>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {keyLocked ? (
+                <Fragment>
+                  <input
+                    className="jev-input jev-mono"
+                    value={keyMask}
+                    readOnly
+                    disabled
+                    style={{ flex: '1 1 150px', opacity: .8 }}
+                  />
+                  <button
+                    className="jev-btn"
+                    disabled={busy !== ''}
+                    title="清空输入框，粘贴新 Key"
+                    onClick={() => { setKeyLocked(false); setKeyMask('') }}
+                  >更换</button>
+                </Fragment>
+              ) : (
+                <Fragment>
+                  <input
+                    className="jev-input"
+                    type={showKey ? 'text' : 'password'}
+                    placeholder={keySource === 'none' ? '至少 10 个字符' : '输入新值以覆盖'}
+                    value={keyDraft}
+                    onChange={event => { setKeyDraft(event.target.value) }}
+                    onKeyDown={event => {
+                      if (event.key !== 'Enter') return
+                      void saveKey()
+                    }}
+                  />
+                  <button
+                    className="jev-btn"
+                    disabled={keyDraft.length === 0}
+                    onClick={() => { setShowKey(!showKey) }}
+                  >{showKey ? '隐藏' : '显示'}</button>
+                  <button
+                    className="jev-btn jev-btn--primary"
+                    disabled={busy !== '' || keyDraft.trim().length < 10}
+                    onClick={() => { void saveKey() }}
+                  >{busy === 'key' ? '…' : '保存'}</button>
+                </Fragment>
+              )}
               <button
                 className="jev-btn"
-                disabled={keyDraft.length === 0}
-                onClick={() => { setShowKey(!showKey) }}
-              >{showKey ? '隐藏' : '显示'}</button>
-              <button
-                className="jev-btn jev-btn--primary"
-                disabled={busy !== '' || keyDraft.trim().length < 10}
-                onClick={() => { void saveKey() }}
-              >{busy === 'key' ? '…' : '保存'}</button>
+                disabled={pingBusy || (!keyLocked && keyDraft.trim().length < 10 && keySource === 'none')}
+                title="向 Provider 发一次最小真实请求，验证 Key 与端点（约 $0.00001）"
+                onClick={() => { void runPing() }}
+              >{pingBusy ? '测试中…' : '测试连接'}</button>
             </div>
+            {pingResult !== null && (
+              <p className="jev-note" style={{ color: pingResult.ok ? TONE.ok : TONE.err }}>
+                {pingResult.ok ? '✓ ' : '✗ '}{pingText(pingResult)}
+              </p>
+            )}
           </div>
-          <p className="jev-note">Key 只写入本机配置；面板不回显已保存的值。</p>
+          <p className="jev-note">Key 只写入本机配置，保存后以脱敏形式显示；「测试连接」会先测未保存的草稿 Key，再测已配置的。</p>
         </section>
 
         <section className="jev-card">

@@ -256,6 +256,7 @@ export function apply(ctx: Context, config: Config): void {
     getCalibration: async (): Promise<CalibrationReport> => (await buildCalibration(false)).report,
     // 面板每 20s 自动刷新会打这个端点：尾部窗口而非全量（/jev-impact 命令才是全量）。
     getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
+    testConnection: (apiKeyOverride) => jev.ping(apiKeyOverride === undefined ? {} : { apiKeyOverride }),
     getLog: (limit) => telemetry.recentEntries(limit),
     updateConfig: async (patch) => {
       // 先立即更新内存（getStatus 立刻能看到，无论 settings 服务是否存在）

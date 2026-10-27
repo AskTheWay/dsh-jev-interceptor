@@ -144,3 +144,64 @@ describe('JevClient', () => {
     expect(entries.at(-1)?.detail).toBe('http-error')
   })
 })
+
+describe('ping', () => {
+  it('reports success with the provider model', async () => {
+    const { client } = await makeClient(async () => okBody())
+    const result = await client.ping()
+    expect(result.ok).toBe(true)
+    expect(result.model).toBe('jev-1.13.0')
+    expect(result.error).toBeUndefined()
+  })
+
+  it('maps HTTP status to precise error codes', async () => {
+    const auth = await makeClient(async () => new Response('unauthorized', { status: 401 }))
+    expect((await auth.client.ping()).error).toBe('auth')
+    const missing = await makeClient(async () => new Response('nope', { status: 404 }))
+    expect((await missing.client.ping()).error).toBe('not-found')
+    const server = await makeClient(async () => new Response('boom', { status: 502 }))
+    expect((await server.client.ping()).error).toBe('server')
+  })
+
+  it('treats 429 as a valid key (rate-limited success)', async () => {
+    const { client } = await makeClient(async () => new Response('slow down', { status: 429 }))
+    const result = await client.ping()
+    expect(result.ok).toBe(true)
+    expect(result.error).toBe('rate-limited')
+  })
+
+  it('distinguishes network failure from malformed payloads', async () => {
+    const net = await makeClient(async () => { throw new Error('ECONNREFUSED') })
+    expect((await net.client.ping()).error).toBe('network')
+    const bad = await makeClient(async () => new Response('{"answers": 42}', { status: 200 }))
+    expect((await bad.client.ping()).error).toBe('invalid-response')
+  })
+
+  it('prefers the draft-key override over the configured key', async () => {
+    let seenAuthorization = ''
+    const { client } = await makeClient(async (_input, init) => {
+      seenAuthorization = String((init?.headers as Record<string, string>)['authorization'])
+      return okBody()
+    })
+    const result = await client.ping({ apiKeyOverride: 'draft-key-12345' })
+    expect(result.ok).toBe(true)
+    expect(seenAuthorization).toBe('Bearer draft-key-12345')
+  })
+
+  it('reports no-key without touching the network', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-test-'))
+    const client = new JevClient({
+      endpoint: 'https://example.test/decisions',
+      model: 'jev-latest',
+      timeoutMs: 1500,
+      cooldownMs: 60_000,
+      failureThreshold: 1,
+      maxConcurrency: 4,
+      cacheSize: 16,
+      resolveKey: async () => undefined,
+      telemetry: new Telemetry(dir),
+      logger: { warn: () => {} },
+    })
+    expect(await client.ping()).toEqual({ ok: false, latencyMs: 0, error: 'no-key' })
+  })
+})

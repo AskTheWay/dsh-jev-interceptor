@@ -8,6 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CalibrationReport } from './calibrate.js'
 import type { ImpactSummary } from './impact.js'
+import type { PingResult } from './jev.js'
 import { clampLogLimit, LOG_PANEL_N, type TelemetryEntry } from './telemetry.js'
 
 const BASE = '/api/jev-interceptor'
@@ -46,6 +47,11 @@ export function registerJevApi(
     getCalibration: () => Promise<CalibrationReport>
     /** 效果归因（净收益/成本/延迟汇总，纯读）。 */
     getImpact: () => Promise<ImpactSummary>
+    /**
+     * 连接测试（发一次最小真实请求；约一次最小决策的成本）。
+     * @param apiKeyOverride - 面板传来的未保存草稿 key；缺省测已配置的 key。
+     */
+    testConnection: (apiKeyOverride?: string) => Promise<PingResult>
     /** 决策明细（/log 路由用；detail 只含枚举与数值 token，无敏感数据）。 */
     getLog: (limit: number) => Promise<TelemetryEntry[]>
     updateConfig: (patch: Record<string, unknown>) => Promise<void>
@@ -86,6 +92,23 @@ export function registerJevApi(
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: async () => json(await deps.getImpact()),
+  })
+
+  connection.fetch.register({
+    path: `${BASE}/test`,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    fetch: async (request: Request) => {
+      // 可选 body {apiKey}：测未保存的草稿 key（不落盘）；无 body 测已配置的。
+      let override: string | undefined
+      try {
+        const body = JSON.parse(await request.text()) as { apiKey?: unknown }
+        if (typeof body.apiKey === 'string' && body.apiKey.length >= 10) override = body.apiKey
+      } catch {
+        // 无 body 或非 JSON：测已配置的 key。
+      }
+      return json(await deps.testConnection(override))
+    },
   })
 
   connection.fetch.register({

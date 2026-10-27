@@ -13,7 +13,17 @@
 
 English | [中文](README.zh.md)
 
-![dsh-jev-interceptor screenshot](imgs/screenshot-01.jpeg)
+![dsh-jev-interceptor](imgs/screenshot-01.jpeg)
+
+![dsh-jev-interceptor panel — overview](imgs/image-2.png)
+
+<p align="center">
+  <img src="imgs/image-3.png" width="32%" alt="Decision log with filters and expandable rows">
+  <img src="imgs/image-4.png" width="32%" alt="Threshold calibration advice with adoption history">
+  <img src="imgs/image-5.png" width="32%" alt="Settings with provider picker and connection test">
+</p>
+
+> The Web panel (sidebar ⚡ → Jev 决策): live KPIs and net-benefit card, a filterable decision log with full evidence per row, shadow-data threshold advice that tracks whether you adopted it, and one-click connection test. Every screenshot above is the real plugin running real decisions.
 
 **What it does, in one breath:** before a tool call runs, Jev classifies its risk, irreversibility, task-fit, and injection-suspicion in one ~$0.00002 request — confident high-risk calls get denied, medium ones escalate to a human, and clearly-granted reversible ones stop wasting your clicks on approval dialogs. And when an `@session` snapshot gets injected, Jev scores every message's value for the citing task so the **error traceback survives the byte budget instead of the oldest small talk**. Every doubt, every timeout, every missing key degrades to stock dsh behavior. Nothing to configure away, nothing that can widen a permission.
 
@@ -63,6 +73,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 /jev-on                 # enable (starts in shadow mode — records, never acts)
 /jev-stats              # watch what it decides, with full probability distributions
 /jev-log 20 --json      # the last N decisions, one per line; --json/--csv export
+/jev-impact             # the bottom line: clicks saved, denials, cost, latency
 /jev-calibrate          # shadow-data threshold advice (never auto-applies)
 /jev-mode enforce       # promote once the numbers look right
 /jev-off                # back to stock behavior
@@ -81,10 +92,10 @@ Happy with the numbers? Flip `mode: enforce`. That's the whole rollout plan — 
 
 ## Receipts (real usage, not benchmarks)
 
-One month of dogfooding (2026-09-22 → 10-22, 14 active days, 6 sessions, 221 decisions — `/jev-impact` renders this from your own telemetry any time):
+Five weeks of dogfooding (2026-09-22 → 10-27, 15 active days, 7 sessions, 272 decisions — `/jev-impact` renders this from your own telemetry any time):
 
-- the pre-approve path never fired all month, so the mis-approval metric has **no samples yet** (0/0, honestly rendered as "无样本" rather than "0") — what *was* exercised: 2 uncertain calls escalated to the human, 0 high-risk calls missed
-- total decision cost: **$0.0041** (96,684 input tokens across 92 billed decisions; p50 1110ms, p95 1454ms)
+- the pre-approve path never fired, so the mis-approval metric has **no samples yet** (0/0, honestly rendered as "无样本" rather than "0") — what *was* exercised: 6 uncertain calls escalated to the human, 0 high-risk calls missed
+- total decision cost: **$0.0068** (162,425 input tokens across 143 billed decisions; p50 1110ms, p95 1503ms — the screenshots above are this same window)
 - 128 decisions degraded to stock behavior (no key for most of the window, 9 timeouts) at **zero behavioral cost** — the fail-closed posture doing exactly what it promises
 
 Calibration closes its own loop: every `/jev-calibrate` run snapshots the report; the next run tells you which of its previous suggestions you adopted (`✓ 已采纳`), ignored, or manually overrode (`↔`), and how the agreement buckets moved since.
