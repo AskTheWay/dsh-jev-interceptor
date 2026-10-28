@@ -20,6 +20,8 @@ interface JevStatus {
   model: string
   keyConfigured: boolean
   keySource: 'config' | 'credentials' | 'env' | 'none'
+  /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
+  persistPath?: string | null
   guardEnabled: boolean
   preapproveEnabled: boolean
   stagnationEnabled: boolean
@@ -225,6 +227,7 @@ export const PANEL_CSS = `
 .jev-toast{display:flex;align-items:center;gap:8px;border-radius:8px;padding:6px 11px;font-size:12px;border:1px solid transparent;}
 .jev-toast[data-tone="ok"]{color:var(--dsw-alias-state-success-primary,#16a34a);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 28%,transparent);}
 .jev-toast[data-tone="err"]{color:var(--dsw-alias-state-error-primary,#dc2626);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#dc2626) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#dc2626) 28%,transparent);}
+.jev-toast[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary,#d97706);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 28%,transparent);}
 .jev-banner{border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 32%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 8%,transparent);color:var(--dsw-alias-state-warn-primary,#d97706);border-radius:10px;padding:7px 11px;font-size:11.5px;line-height:17px;}
 .jev-hero{border:1px solid var(--dsw-alias-border-l1);border-radius:14px;background:var(--dsw-alias-bg-layer-1);padding:13px 15px;display:flex;gap:18px;flex-wrap:wrap;align-items:center;}
 .jev-kpis{flex:1 1 460px;min-width:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:9px;}
@@ -615,7 +618,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState('')
   const [busy, setBusy] = useState('')
-  const [toast, setToast] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
+  const [toast, setToast] = useState<{ tone: 'ok' | 'err' | 'warn'; text: string } | null>(null)
   const [updatedAt, setUpdatedAt] = useState(0)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [calibBusy, setCalibBusy] = useState(false)
@@ -700,7 +703,14 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     if (previous !== null && optimistic !== undefined) setStatus({ ...previous, ...optimistic })
     try {
       await putConfig(patch)
-      setToast({ tone: 'ok', text: '已保存' })
+      // 诚实反馈：设置服务不落盘时（persistPath 探测为 null）明确说"重启丢失"。
+      const volatile = previous !== null && previous.persistPath === null
+      setToast({
+        tone: volatile ? 'warn' : 'ok',
+        text: volatile
+          ? '已生效（仅本运行）：设置服务不落盘，重启丢失——请写入 cordis.patch.yml 的 jev-interceptor 行'
+          : '已保存',
+      })
       void load(true)
       return true
     } catch (error) {

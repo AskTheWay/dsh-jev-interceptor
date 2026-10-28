@@ -9,6 +9,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: npm
+    permissions:
+      # npm provenance（发布物与仓库的签名关联）需要 OIDC token。
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +34,6 @@ jobs:
         run: npm run build
 
       - name: Publish
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

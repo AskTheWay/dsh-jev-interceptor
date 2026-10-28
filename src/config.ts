@@ -31,7 +31,7 @@ export interface Config {
   apiKeyEnv?: string
   /** API key 值（/jev-key 写入；优先于环境变量）. */
   apiKey?: string
-  /** Wall-clock budget per decision attempt in milliseconds (default 1500). */
+  /** Wall-clock budget per decision attempt in milliseconds (default 1500; 3000 when provider is openrouter — its decisions endpoint sits around 2-3s). */
   timeoutMs?: number
   /** Cooldown after consecutive failures in milliseconds (default 60000). */
   cooldownMs?: number
@@ -124,6 +124,8 @@ export const DEFAULTS = {
   provider: 'typesafe' as const,
   apiKeyEnv: 'TYPESAFE_API_KEY',
   timeoutMs: 1500,
+  /** OpenRouter 的 decisions 端点实测 2-3s（本机 p95 ~3s），显式配置可覆盖。 */
+  openrouterTimeoutMs: 3000,
   cooldownMs: 60_000,
   failureThreshold: 3,
   maxConcurrency: 4,
@@ -250,7 +252,9 @@ export interface ResolvedSettings {
 export function resolveSettings(config: Config): ResolvedSettings {
   return {
     mode: config.mode ?? DEFAULTS.mode,
-    timeoutMs: config.timeoutMs ?? DEFAULTS.timeoutMs,
+    // timeoutMs 未显式配置时跟随 provider：TypeSafe 直连 ~1s 内，OpenRouter 代理 ~3s。
+    timeoutMs: config.timeoutMs
+      ?? (config.provider === 'openrouter' ? DEFAULTS.openrouterTimeoutMs : DEFAULTS.timeoutMs),
     cooldownMs: config.cooldownMs ?? DEFAULTS.cooldownMs,
     failureThreshold: config.failureThreshold ?? DEFAULTS.failureThreshold,
     maxConcurrency: config.maxConcurrency ?? DEFAULTS.maxConcurrency,

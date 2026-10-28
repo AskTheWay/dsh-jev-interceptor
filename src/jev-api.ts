@@ -20,6 +20,8 @@ export interface JevPanelStatus {
   model: string
   keyConfigured: boolean
   keySource: 'config' | 'credentials' | 'env' | 'none'
+  /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
+  persistPath: string | null
   guardEnabled: boolean
   preapproveEnabled: boolean
   stagnationEnabled: boolean

@@ -176,6 +176,24 @@ export function apply(ctx: Context, config: Config): void {
   let configOverride: Config | undefined
   const live = (): LiveSettings => liveOverride ?? liveOf(configOverride ?? config)
 
+  /**
+   * 探测 settings 服务的落盘路径（documentPath）：null 表示非 file provider
+   * 或探测失败——此时 update 只在内存生效，重启即丢，用户界面必须如实告知
+   * 而不是声称"已持久化"。
+   */
+  const settingsPersistPath = (): string | null => {
+    try {
+      const s = ctx.get('settings') as { documentPath?: () => unknown } | undefined
+      if (s !== undefined && typeof s.documentPath === 'function') {
+        const p = s.documentPath()
+        if (typeof p === 'string' && p.length > 0) return p
+      }
+    } catch {
+      // 探测失败按无持久化处理（诚实降级）。
+    }
+    return null
+  }
+
   // Register our Config schema with the settings provider → the Plugins page
   // discovers it via describe() and renders the form.
   ctx.inject(['settings'], (settingsCtx) => {
@@ -245,6 +263,8 @@ export function apply(ctx: Context, config: Config): void {
         model: cfg.model ?? 'jev-latest',
         keyConfigured: cfg.apiKey !== undefined && cfg.apiKey.length > 0,
         keySource: cfg.apiKey !== undefined && cfg.apiKey.length > 0 ? 'config' : 'env',
+        // null = 设置服务不落盘（面板保存后据此警告"重启丢失"）。
+        persistPath: settingsPersistPath(),
         guardEnabled: settings.guardEnabled,
         preapproveEnabled: settings.preapproveEnabled,
         stagnationEnabled: settings.stagnationEnabled,
@@ -371,10 +391,14 @@ export function apply(ctx: Context, config: Config): void {
       try {
         await settingsService.update(SETTINGS_NS, patch)
         const now = live()
+        const persistPath = settingsPersistPath()
+        const persistenceNote = persistPath !== null
+          ? `已持久化到 ${persistPath}`
+          : '⚠ 当前组合的设置服务不落盘——重启后丢失；要永久生效请写入 cordis.patch.yml 的 jev-interceptor 行'
         return {
           kind: 'success',
           text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode}。`
-            + ' 已持久化到 profile，下一个工具调用即生效（无需重启）。',
+            + ` ${persistenceNote} 下一个工具调用即生效（无需重启）。`,
         }
       } catch (error: unknown) {
         ctx.logger.warn(`dsh-jev-interceptor: settings update failed (${error instanceof Error ? error.message : String(error)}); applied in-memory only for this run`)
@@ -479,9 +503,13 @@ export function apply(ctx: Context, config: Config): void {
         if (settingsService !== undefined && typeof settingsService.update === 'function') {
           try {
             await settingsService.update(SETTINGS_NS, { apiKey: key })
+            const persistPath = settingsPersistPath()
             return {
               kind: 'success',
-              text: 'dsh-jev-interceptor：API key 已存储 ✅ 持久化到 profile，无需环境变量，重启后仍生效。下一步：/jev-on 启用插件',
+              text: persistPath !== null
+                ? `dsh-jev-interceptor：API key 已存储 ✅ 持久化到 ${persistPath}，无需环境变量，重启后仍生效。下一步：/jev-on 启用插件`
+                : 'dsh-jev-interceptor：API key 已存储 ✅（本运行生效）。⚠ 当前组合的设置服务不落盘，重启后丢失——'
+                  + '请把 apiKey 写进 cordis.patch.yml 的 jev-interceptor 行永久生效',
             }
           } catch (error: unknown) {
             ctx.logger.warn(`dsh-jev-interceptor: key storage failed (${error instanceof Error ? error.message : String(error)})`)

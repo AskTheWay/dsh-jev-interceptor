@@ -79,6 +79,9 @@ type RequestOutcome =
   | 'invalid-response'
   | { answers: JevAnswers; model: string; inputTokens: number | undefined; costUsd: number | undefined }
 
+/** 连接测试的最小预算（毫秒）：决策要快速降级，测试是用户主动等待的操作——给足下限。 */
+const PING_MIN_BUDGET_MS = 5_000
+
 /** 连接测试结果（错误码由展示层映射为中文）。 */
 export interface PingResult {
   readonly ok: boolean
@@ -214,15 +217,17 @@ export class JevClient {
    * 连接测试：发一次最小真实请求验证 key、端点与模型。
    *
    * 刻意绕过缓存（测试就该真打）、冷却门（用户主动测试要立刻的答案）与
-   * 遥测（测试不是决策）；独立于 request() 实现——需要精确的 HTTP 状态码
-   * 区分「key 无效」与「端点不存在」，那是排障最关键的一刀。
+   * 遥测（测试不是决策）；预算独立放宽（max(决策预算, 5s)）——决策要快速
+   * 降级，测试是用户主动等待的操作，OpenRouter 代理常态 2-3s 用决策预算会
+   * 假超时。独立于 request() 实现——需要精确的 HTTP 状态码区分「key 无效」
+   * 与「端点不存在」，那是排障最关键的一刀。
    * @param options - `apiKeyOverride`：用未保存的草稿 key 测试；`signal`：取消。
    */
   async ping(options: { apiKeyOverride?: string; signal?: AbortSignal } = {}): Promise<PingResult> {
     const started = this.now()
     const key = options.apiKeyOverride ?? await this.resolveKey()
     if (key === undefined || key.length === 0) return { ok: false, latencyMs: 0, error: 'no-key' }
-    const timer = AbortSignal.timeout(this.timeoutMs)
+    const timer = AbortSignal.timeout(Math.max(this.timeoutMs, PING_MIN_BUDGET_MS))
     const signal = options.signal === undefined ? timer : AbortSignal.any([options.signal, timer])
     let response: Response
     try {
