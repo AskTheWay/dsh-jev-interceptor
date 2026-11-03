@@ -10,7 +10,7 @@
  * 明细也不再是没有表头的单行流。
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
 interface JevStatus {
@@ -22,6 +22,10 @@ interface JevStatus {
   keySource: 'config' | 'credentials' | 'env' | 'none'
   /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
   persistPath?: string | null
+  /** 当日已花（USD，进程内记账）。 */
+  costTodayUsd?: number
+  /** 每日成本限额（USD）；0 = 不限。 */
+  dailyCostLimitUsd?: number
   guardEnabled: boolean
   preapproveEnabled: boolean
   stagnationEnabled: boolean
@@ -98,6 +102,8 @@ const TONE = {
   warn: 'var(--dsw-alias-state-warn-primary,#d97706)',
   err: 'var(--dsw-alias-state-error-primary,#dc2626)',
   brand: 'var(--dsw-alias-brand-primary,#4d76e6)',
+  /** 第四语义色：DeepSeek 品牌色（官方 state-business 变量）。 */
+  business: 'var(--dsw-alias-state-business-primary,#6366f1)',
   muted: 'var(--dsw-alias-label-secondary,#8a8a8a)',
 } as const
 
@@ -110,37 +116,54 @@ const MODE_HINT: Record<string, string> = {
   enforce: '按决策放行或转人工',
 }
 
-/** 决策环节（tag）的中文名与一句话说明。 */
-const TAG_META: Record<string, { label: string; hint: string }> = {
-  guard: { label: '守门人', hint: '工具调用的风险 / 不可逆 / 注入判断' },
-  preapprove: { label: '预批准', hint: '明确已授权就免点击' },
-  'session-reference': { label: '会话保留', hint: '@ 引用快照的价值打分' },
-  'approval-loop': { label: '审批一致率', hint: '影子决策与人工决定的对照' },
-  stagnation: { label: '停滞检测', hint: '重复失败时提醒换路' },
+/** 决策环节（tag）的中文名、一句话说明与专属色调（每个环节一种颜色）。 */
+const TAG_META: Record<string, { label: string; hint: string; tone: Tone }> = {
+  guard: { label: '守门人', hint: '工具调用的风险 / 不可逆 / 注入判断', tone: 'brand' },
+  preapprove: { label: '预批准', hint: '明确已授权就免点击', tone: 'ok' },
+  'session-reference': { label: '会话保留', hint: '@ 引用快照的价值打分', tone: 'business' },
+  'approval-loop': { label: '审批一致率', hint: '影子决策与人工决定的对照', tone: 'muted' },
+  stagnation: { label: '停滞检测', hint: '重复失败时提醒换路', tone: 'warn' },
 }
 
-/** 决策动作的中文名与色调。 */
-const ACTION_META: Record<string, { label: string; tone: Tone }> = {
-  delegate: { label: '放行', tone: 'muted' },
+/**
+ * 决策动作的中文名与色调。视觉编码约定：
+ * - 实色 = Jev 生效的决策（放行紫 / 转人工橙 / 拒绝红 / 自动批绿 / 人工蓝 / 打分绿）；
+ * - 斜纹半透明（isFallback）= 降级回退（决策系统没工作，走默认）；
+ * - 实灰 = 默认/跳过类。同一张卡内共现的动作颜色互异。
+ */
+const ACTION_META: Record<string, { label: string; tone: Tone; fallback?: boolean }> = {
+  delegate: { label: '放行', tone: 'business' },
   ask: { label: '转人工', tone: 'warn' },
   deny: { label: '拒绝', tone: 'err' },
   'auto-approve': { label: '自动批准', tone: 'ok' },
   human: { label: '人工决定', tone: 'brand' },
-  degraded: { label: '降级放行', tone: 'muted' },
+  degraded: { label: '降级放行', tone: 'muted', fallback: true },
   skipped: { label: '跳过', tone: 'muted' },
-  'retention-scored': { label: '打分保留', tone: 'brand' },
+  'retention-scored': { label: '打分保留', tone: 'ok' },
   'retention-fifo': { label: 'FIFO 淘汰', tone: 'muted' },
   agreement: { label: '一致率', tone: 'brand' },
   'stagnation-alert': { label: '停滞提醒', tone: 'warn' },
 }
 
-/** 一致率分桶（approval-loop 专属）。 */
-const BUCKET_LABEL: Record<string, string> = {
-  'would-over-approve': '本会误批',
-  'aligned-approve': '与人工一致（准）',
-  'aligned-reject': '与人工一致（拒）',
-  'friction-human-approved': '多一次人工确认',
-  neutral: '中性',
+/** 降级回退的斜纹底（与实色决策形成"生效/未生效"的视觉区分）。 */
+const FADED_FILL = 'repeating-linear-gradient(45deg, var(--dsw-alias-label-secondary,#8a8a8a) 0 3px, transparent 3px 7px)'
+
+function actionMeta(action: string): { label: string; tone: Tone; fallback?: boolean } {
+  return ACTION_META[action] ?? { label: action, tone: 'brand' }
+}
+
+/** 图例色块 / 堆叠条段的背景：降级类用斜纹，其余实色。 */
+function actionFill(meta: { tone: Tone; fallback?: boolean }): string {
+  return meta.fallback === true ? FADED_FILL : TONE[meta.tone]
+}
+
+/** 一致率分桶（approval-loop 专属）：标签 + 语义色调。 */
+const BUCKET_LABEL: Record<string, { label: string; tone: Tone }> = {
+  'would-over-approve': { label: '本会误批', tone: 'err' },
+  'aligned-approve': { label: '与人工一致（准）', tone: 'ok' },
+  'aligned-reject': { label: '与人工一致（拒）', tone: 'ok' },
+  'friction-human-approved': { label: '多一次人工确认', tone: 'warn' },
+  neutral: { label: '中性', tone: 'muted' },
 }
 
 const PROVIDERS = [
@@ -201,7 +224,7 @@ const TABS = [
 
 /** 面板样式表（官方主题 token 驱动；深浅主题与第三方主题自动跟随）。 */
 export const PANEL_CSS = `
-.jev-root{height:100%;overflow-y:auto;box-sizing:border-box;padding:20px 24px 48px;display:flex;flex-direction:column;gap:14px;max-width:1120px;font-size:13px;line-height:1.55;color:var(--dsw-alias-label-primary);}
+.jev-root{height:100%;min-height:0;max-height:100vh;box-sizing:border-box;padding:20px 24px 24px;display:flex;flex-direction:column;gap:14px;max-width:1120px;font-size:13px;line-height:1.55;color:var(--dsw-alias-label-primary);}
 .jev-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;}
 .jev-logo{flex:none;width:34px;height:34px;border-radius:11px;display:grid;place-items:center;font-size:16px;line-height:1;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d76e6) 13%,transparent);}
 .jev-headtext{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
@@ -363,9 +386,6 @@ function shortId(value: string | undefined): string {
   return value.length > 14 ? `${value.slice(0, 10)}…` : value
 }
 
-function actionMeta(action: string): { label: string; tone: Tone } {
-  return ACTION_META[action] ?? { label: action, tone: 'brand' }
-}
 
 /** 美元格式化（与宿主 renderImpact 的 usd() 同口径：<$0.01 用 6 位小数）。 */
 function fmtUsd(value: number): string {
@@ -407,8 +427,15 @@ function oneLineSummary(impact: Impact): string {
   return `enforce 期还没有生效动作${suffix}`
 }
 
-function tagMeta(tag: string): { label: string; hint: string } {
-  return TAG_META[tag] ?? { label: tag, hint: '' }
+function tagMeta(tag: string): { label: string; hint: string; tone: Tone } {
+  return TAG_META[tag] ?? { label: tag, hint: '', tone: 'muted' }
+}
+
+/** 阈值参数名的归属色调（guard* → 守门人蓝，preapprove* → 预批准绿）。 */
+function paramTone(param: string): Tone {
+  if (param.startsWith('guard')) return 'brand'
+  if (param.startsWith('preapprove')) return 'ok'
+  return 'muted'
 }
 
 /** 一条决策的稳定行键（ts 可能重复，附加序号）。 */
@@ -492,9 +519,10 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   return <div className="jev-fact"><span>{label}</span><b>{children}</b></div>
 }
 
-/** 单个决策环节的分布卡：堆叠条 + 图例。 */
+/** 单个决策环节的分布卡：环节专属色条 + 堆叠条 + 图例。 */
 function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
   const meta = tagMeta(summary.tag)
+  const toneColor = TONE[meta.tone]
   const actions = summary.actions ?? {}
   const entries = Object.entries(actions).filter(entry => entry[1] > 0).sort((left, right) => right[1] - left[1])
   const total = summary.calls > 0 ? summary.calls : entries.reduce((sum, entry) => sum + entry[1], 0)
@@ -502,10 +530,13 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
     ? []
     : Object.entries(summary.agreementBuckets).filter(entry => entry[1] > 0)
   return (
-    <article className="jev-card">
+    <article className="jev-card" style={{ borderLeft: `3px solid ${toneColor}` }}>
       <header className="jev-card-head">
         <div style={{ minWidth: 0 }}>
-          <div className="jev-card-title">{meta.label}</div>
+          <div className="jev-card-title" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <span className="jev-swatch" style={{ background: toneColor, width: 9, height: 9, flex: 'none' }} />
+            {meta.label}
+          </div>
           <div className="jev-card-sub">{meta.hint}</div>
         </div>
         <div className="jev-card-metrics">
@@ -521,7 +552,7 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
             <i
               key={entry[0]}
               title={`${actionMeta(entry[0]).label} ${String(entry[1])}`}
-              style={{ width: `${String(total > 0 ? entry[1] / total * 100 : 0)}%`, background: TONE[actionMeta(entry[0]).tone] }}
+              style={{ width: `${String(total > 0 ? entry[1] / total * 100 : 0)}%`, background: actionFill(actionMeta(entry[0])) }}
             />
           ))}
       </div>
@@ -531,7 +562,7 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
           <ul className="jev-legend">
             {entries.map(entry => (
               <li key={entry[0]}>
-                <span className="jev-swatch" style={{ background: TONE[actionMeta(entry[0]).tone] }} />
+                <span className="jev-swatch" style={{ background: actionFill(actionMeta(entry[0])) }} />
                 <span className="jev-legend-label">{actionMeta(entry[0]).label}</span>
                 <b>{fmtNum(entry[1])}</b>
                 <span className="jev-legend-pct">{`${String(total > 0 ? Math.round(entry[1] / total * 100) : 0)}%`}</span>
@@ -540,21 +571,36 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
           </ul>
         )}
       {buckets.length === 0 ? null : (
-        <p className="jev-note">
-          一致率分桶：
-          {buckets.map(entry => `${BUCKET_LABEL[entry[0]] ?? entry[0]} ${String(entry[1])}`).join(' · ')}
-        </p>
+        <ul className="jev-mini">
+          {buckets.map(entry => {
+            const bucket = BUCKET_LABEL[entry[0]] ?? { label: entry[0], tone: 'muted' as Tone }
+            const color = TONE[bucket.tone]
+            return (
+              <li key={entry[0]}>
+                <span style={{ color }}>{bucket.label}</span>
+                <b style={{ marginLeft: 'auto', color }}>{fmtNum(entry[1])}</b>
+              </li>
+            )
+          })}
+        </ul>
       )}
     </article>
   )
 }
 
-/** 一条决策明细（点击展开全字段）。 */
+/** 一条决策明细（点击展开全字段；展开时把详情滚进视野，不被视口裁掉）。 */
 function LogRow({ entry, open, onToggle }: {
   entry: LogEntry
   open: boolean
   onToggle: () => void
 }): React.JSX.Element {
+  const detailRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    // 表格末尾的行展开后，详情会延伸到视口之外——自动滚到最近可见位置。
+    if (open && detailRef.current !== null) {
+      detailRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  }, [open])
   const meta = actionMeta(entry.action)
   const latency = entry.latencyMs === undefined ? '—' : `${entry.cached === true ? '⚡ ' : ''}${String(entry.latencyMs)}ms`
   const detail = entry.detail ?? ''
@@ -573,14 +619,14 @@ function LogRow({ entry, open, onToggle }: {
       }}
     >
       <span className="jev-cell jev-time" title={entry.ts}>{clockOf(entry.ts)}<i>{relativeOf(entry.ts)}</i></span>
-      <span className="jev-cell jev-col-tag jev-strong">{tagMeta(entry.tag).label}</span>
+      <span className="jev-cell jev-col-tag jev-strong" style={{ color: TONE[tagMeta(entry.tag).tone] }}>{tagMeta(entry.tag).label}</span>
       <span className="jev-cell jev-mono jev-col-tool" title={entry.tool ?? ''}>{entry.tool ?? '—'}</span>
       <span className="jev-cell"><Badge tone={meta.tone}>{meta.label}</Badge></span>
       <span className="jev-cell jev-num jev-col-lat">{latency}</span>
       <span className="jev-cell jev-num jev-col-mode">{MODE_LABEL[entry.mode] ?? entry.mode}</span>
       <span className="jev-cell jev-mono jev-detail jev-col-detail" title={detail}>{detail.length === 0 ? '—' : detail}</span>
       {open && (
-        <div className="jev-detail-full">
+        <div ref={detailRef} className="jev-detail-full">
           <div className="jev-kv"><span>模式</span><b>{`${MODE_LABEL[entry.mode] ?? entry.mode}（${entry.mode === 'shadow' ? '未生效' : '已生效'}）`}</b></div>
           <div className="jev-kv"><span>模型</span><b>{entry.model ?? '—'}</b></div>
           <div className="jev-kv"><span>工具</span><b>{entry.tool ?? '—'}</b></div>
@@ -634,6 +680,9 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [filterMode, setFilterMode] = useState('all')
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
+  // 决策记录分页：一次拉满 API 上限 500 条本地分页，翻页零延迟。
+  const [logPage, setLogPage] = useState(1)
+  const [pageJump, setPageJump] = useState('')
 
   const load = useCallback(async (silent: boolean): Promise<void> => {
     if (!silent) setLoading(true)
@@ -641,7 +690,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       const [statusResult, statsResult, logResult, impactResult] = await Promise.allSettled([
         getJson('/status'),
         getJson('/stats'),
-        getJson('/log?limit=80'),
+        getJson('/log?limit=500'),
         getJson('/impact'),
       ])
       if (statusResult.status === 'fulfilled') {
@@ -672,7 +721,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     }
   }, [])
 
-  useEffect(() => { void load(false) }, [load])
+  useEffect(() => { void load(false) }, [])
 
   // 自动刷新：页面不可见时跳过，避免后台空转。
   useEffect(() => {
@@ -779,6 +828,22 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     }
   }, [])
 
+  /** 一键应用单条校准建议：PUT 阈值（热生效），成功后重新生成报告看采纳标记。 */
+  const applyAdvice = useCallback(async (param: string, suggested: number): Promise<void> => {
+    setToast(null)
+    // 入口即置忙：PUT 往返期间禁用所有应用/生成按钮（防双击重复 PUT 与并发报告）。
+    setCalibBusy(true)
+    try {
+      await putConfig({ [param]: suggested })
+      setToast({ tone: 'ok', text: `已应用 ${param} → ${suggested.toFixed(2)}（下一个调用即生效）` })
+      await runCalibration()
+    } catch (error) {
+      setToast({ tone: 'err', text: `应用失败：${error instanceof Error ? error.message : String(error)}` })
+    } finally {
+      setCalibBusy(false)
+    }
+  }, [runCalibration])
+
   /** 跨环节汇总：总数 / 自动批准 / 转人工 / 拒绝 / 降级。 */
   const aggregate = useMemo(() => {
     const result = { calls: 0, auto: 0, ask: 0, deny: 0, delegate: 0, degraded: 0 }
@@ -801,15 +866,36 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     return counts
   }, [log])
 
-  const rows = useMemo(() => {
+  const filteredLog = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return log.filter(entry => (filterAction === 'all' || entry.action === filterAction)
       && (filterMode === 'all' || entry.mode === filterMode)
       && (needle.length === 0
         || (entry.tool ?? '').toLowerCase().includes(needle)
         || (entry.detail ?? '').toLowerCase().includes(needle)))
-      .slice(0, 120)
   }, [log, filterAction, filterMode, query])
+
+  /** 每页条数：20 条保证一屏内完整可见（表格 + 分页栏不依赖滚动）。 */
+  const LOG_PAGE_SIZE = 20
+  const totalPages = Math.max(1, Math.ceil(filteredLog.length / LOG_PAGE_SIZE))
+  const safePage = Math.min(Math.max(1, logPage), totalPages)
+  const rows = useMemo(
+    () => filteredLog.slice((safePage - 1) * LOG_PAGE_SIZE, safePage * LOG_PAGE_SIZE),
+    [filteredLog, safePage],
+  )
+
+  /** 筛选变化回第 1 页（避免停在一个不存在的高页码上看空表）。 */
+  useEffect(() => { setLogPage(1) }, [filterAction, filterMode, query])
+
+  /** 翻页：切页并把 tab 内容区滚回顶部（新页内容从表格第一行开始看）。 */
+  const gotoPage = useCallback((page: number): void => {
+    setLogPage(Math.min(Math.max(1, page), totalPages))
+    setPageJump('')
+    if (typeof document !== 'undefined') {
+      const body = document.querySelector('.jev-tab-body')
+      if (body !== null) body.scrollTop = 0
+    }
+  }, [totalPages])
 
   const recent = useMemo(() => log.slice(0, 6), [log])
 
@@ -994,8 +1080,47 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                 })}
               </div>
             )}
+        {/* 分页导航吸在视口底部：翻页无需滚动找按钮（不用负边距铺满，避免横向溢出）。 */}
+        <div className="jev-toolbar" style={{
+          justifyContent: 'center',
+          position: 'sticky',
+          bottom: 0,
+          zIndex: 2,
+          background: 'var(--dsw-alias-bg-base,#fff)',
+          borderTop: '1px solid var(--dsw-alias-border-l1)',
+          borderRadius: '0 0 12px 12px',
+          paddingTop: 8,
+          paddingBottom: 8,
+        }}>
+          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(1) }}>首页</button>
+          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(safePage - 1) }}>← 上一页</button>
+          <span className="jev-note" style={{ whiteSpace: 'nowrap' }}>
+            {`第 ${String(safePage)} / ${String(totalPages)} 页 · 本页 ${fmtNum(rows.length)} 条（共 ${fmtNum(filteredLog.length)} 条）`}
+          </span>
+          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(safePage + 1) }}>下一页 →</button>
+          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(totalPages) }}>末页</button>
+          <span className="jev-note" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            跳至
+            <input
+              className="jev-search"
+              style={{ width: 64, flex: 'none', textAlign: 'center' }}
+              type="number"
+              min={1}
+              max={totalPages}
+              value={pageJump}
+              placeholder={String(safePage)}
+              onChange={event => { setPageJump(event.target.value) }}
+              onKeyDown={event => {
+                if (event.key !== 'Enter') return
+                const target = Number.parseInt(pageJump, 10)
+                if (Number.isFinite(target)) gotoPage(target)
+              }}
+            />
+            页
+          </span>
+        </div>
         <p className="jev-note">
-          {`已载入最近 ${fmtNum(log.length)} 条，显示 ${fmtNum(rows.length)} 条；点一行展开完整字段。`}
+          {`已载入最近 ${fmtNum(log.length)} 条（面板上限 500）；点一行展开完整字段，更早记录用 /jev-log 500 --json。`}
         </p>
       </Fragment>
     )
@@ -1040,16 +1165,28 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                   )}
                 </div>
                 {calib.advice.length === 0
-                  ? <p className="jev-note">没有需要调整的阈值，当前参数与遥测分布一致。</p>
+                  ? (
+                    <div className="jev-empty">
+                      <b>当前无需调整阈值</b>
+                      <div>遥测分布与现配置一致（或上次建议已全部应用）。有新的调整建议时，每条建议卡右上角会出现「应用」按钮。</div>
+                    </div>
+                  )
                   : calib.advice.map(advice => (
                     <div key={advice.param} className="jev-advice">
                       <div className="jev-advice-head">
-                        <span className="jev-param">{advice.param}</span>
+                        <span className="jev-param" style={{ color: TONE[paramTone(advice.param)] }}>{advice.param}</span>
                         <span className="jev-delta">
                           {advice.current.toFixed(2)}<i> → </i>{advice.suggested.toFixed(2)}
                           {` ${advice.suggested > advice.current ? '↑' : '↓'}`}
                         </span>
                         <Badge tone="muted">{`样本 ${fmtNum(advice.samples)}`}</Badge>
+                        <button
+                          className="jev-btn jev-btn--primary"
+                          style={{ marginLeft: 'auto' }}
+                          disabled={calibBusy}
+                          title="写入该阈值并立即生效（不重启）；持久化取决于设置服务"
+                          onClick={() => { void applyAdvice(advice.param, advice.suggested) }}
+                        >应用</button>
                       </div>
                       <p className="jev-note">{advice.basis}</p>
                       {(advice.note ?? '').length === 0 ? null : <p className="jev-note">{advice.note}</p>}
@@ -1067,7 +1204,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                     <p className="jev-note">{calib.observations.map(note => note.reason).join('；')}</p>
                   </div>
                 )}
-                <p className="jev-note">报告不写回配置：确认后再改 cordis.yml，或等下一版面板提供一键应用。</p>
+                <p className="jev-note">「应用」写入阈值并立即生效（无需重启）；持久化取决于设置服务是否落盘。</p>
               </Fragment>
             )}
         </section>
@@ -1331,6 +1468,13 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
             <Fact label="Provider">{provider}</Fact>
             <Fact label="模型">{status.model}</Fact>
             <Fact label="API Key">{KEY_SOURCE[keySource] ?? keySource}</Fact>
+            <Fact label="今日成本">
+              {status.costTodayUsd === undefined
+                ? '—'
+                : (status.dailyCostLimitUsd ?? 0) > 0
+                  ? `$${status.costTodayUsd.toFixed(6)} / 限 $${(status.dailyCostLimitUsd ?? 0).toFixed(2)}${status.costTodayUsd >= (status.dailyCostLimitUsd ?? Infinity) ? '（已超限，降级中）' : ''}`
+                  : `$${status.costTodayUsd.toFixed(6)}`}
+            </Fact>
           </div>
         </section>
       )}
@@ -1365,15 +1509,20 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         </div>
       ) : null}
 
-      {status === null
-        ? null
-        : tab === 'overview'
-          ? renderOverview()
-          : tab === 'log'
-            ? renderLog()
-            : tab === 'calibration'
-              ? renderCalibration()
-              : renderSettings()}
+      {status === null ? null : (
+        // tab 内容区自带滚动（flex:1 + min-height:0）：不依赖 dsh 布局的父级
+        // 高度链（centerCol 是 overflow:hidden 裁剪容器，外部滚动不可用）。
+        // 主路径（分页 20 条/页）不依赖滚动，这里只是长内容（概览/设置）的兜底。
+        <div className="jev-tab-body" style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>
+          {tab === 'overview'
+            ? renderOverview()
+            : tab === 'log'
+              ? renderLog()
+              : tab === 'calibration'
+                ? renderCalibration()
+                : renderSettings()}
+        </div>
+      )}
 
       {status === null && !loading ? (
         <div className="jev-empty">

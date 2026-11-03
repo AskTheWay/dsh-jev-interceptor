@@ -35,6 +35,18 @@ export type ThresholdKey =
   | 'preapproveIrreversibleMax'
   | 'preapproveInjectionSuspectMax'
 
+/** 阈值键的单一权威清单：热更新白名单、API 白名单、快照落盘均从此派生。 */
+export const THRESHOLD_KEYS = [
+  'guardConfidenceMin',
+  'guardDenyConfidence',
+  'guardIrreversibleCeiling',
+  'guardIrreversibleDenyFloor',
+  'guardInjectionAskThreshold',
+  'preapproveAutoApproveMin',
+  'preapproveIrreversibleMax',
+  'preapproveInjectionSuspectMax',
+] as const satisfies readonly ThresholdKey[]
+
 /** 校准基线：当前生效阈值（ResolvedSettings 的阈值子集）。 */
 export type ThresholdsInput = Pick<ResolvedSettings, ThresholdKey>
 
@@ -628,7 +640,8 @@ export function renderCalibration(report: CalibrationReport, extras: readonly st
   lines.push('━'.repeat(44))
   lines.push('📌 本报告不自动应用。请人工确认后把建议值复制到')
   lines.push('   cordis.patch.yml 的 jev-interceptor 配置行（或 Settings → Plugins')
-  lines.push('   表单），保存后生效。下次 /jev-calibrate 将以新阈值重新评估。')
+  lines.push('   表单 / 面板建议卡的「应用」按钮），保存后生效。下次 /jev-calibrate')
+  lines.push('   将以新阈值重新评估并标记采纳情况。')
   lines.push('```')
   return lines.join('\n')
 }

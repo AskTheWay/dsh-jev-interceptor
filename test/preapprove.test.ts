@@ -56,11 +56,11 @@ async function makeDeps(overrides: Partial<Omit<PreapproveDeps, 'live'>> & { liv
   return {
     live: () => ({ ...live }),
     allowlist: new Set(['bash']),
-    thresholds: {
+    thresholds: () => ({
       autoApproveMin: 0.85,
       irreversibleMax: 0.15,
       injectionSuspectMax: 0.5,
-    } satisfies PreapproveThresholds,
+    }) satisfies PreapproveThresholds as PreapproveThresholds,
     recentMessages: 3,
     recentMessageChars: 300,
     jev: stub,

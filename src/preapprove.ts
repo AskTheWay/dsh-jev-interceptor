@@ -36,7 +36,8 @@ export interface PreapproveDeps {
   /** Live settings read once per event: runtime toggles take effect immediately. */
   readonly live: () => LiveSettings
   readonly allowlist: ReadonlySet<string>
-  readonly thresholds: PreapproveThresholds
+  /** 每事件读取的阈值（函数）：热更新后下一个调用即生效。 */
+  readonly thresholds: () => PreapproveThresholds
   readonly recentMessages: number
   readonly recentMessageChars: number
   readonly jev: JevClient
@@ -168,7 +169,7 @@ async function evaluatePreapprove(
     })
     return undefined
   }
-  const verdict = decidePreapprove(extracted, deps.thresholds)
+  const verdict = decidePreapprove(extracted, deps.thresholds())
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'preapprove',

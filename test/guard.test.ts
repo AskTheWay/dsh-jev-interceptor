@@ -55,13 +55,13 @@ async function makeDeps(overrides: Partial<Omit<GuardDeps, 'live'>> & { live?: (
     live: () => ({ ...live }),
     readOnlyTools: new Set(['read', 'grep']),
     excludeTools: new Set(),
-    thresholds: {
+    thresholds: () => ({
       confidenceMin: 0.6,
       denyConfidence: 0.85,
       irreversibleCeiling: 0.2,
       irreversibleDenyFloor: 0.5,
       injectionAskThreshold: 0.8,
-    } satisfies GuardThresholds,
+    }) satisfies GuardThresholds as GuardThresholds,
     recentMessages: 6,
     recentMessageChars: 300,
     argsHeadChars: 2048,
@@ -204,5 +204,33 @@ describe('createGuardListener', () => {
     live.enabled = true
     const decision = await listener(fakeExec(), nextAllow)
     expect(decision.kind).toBe('deny')
+  })
+})
+
+describe('threshold hot-reload', () => {
+  it('picks up threshold changes from the getter without remounting', async () => {
+    const thresholds = {
+      confidenceMin: 0.6,
+      denyConfidence: 0.85,
+      irreversibleCeiling: 0.2,
+      irreversibleDenyFloor: 0.5,
+      injectionAskThreshold: 0.8,
+    }
+    const listener = createGuardListener(await makeDeps({
+      thresholds: () => ({ ...thresholds }),
+      classify: async () => fakeResult({
+        answers: {
+          risk: { type: 'choice', choice: 'medium', probabilities: { medium: 0.8 }, confidence: 0.8 },
+          irreversible: { type: 'noul', noul: 0.1 },
+          matches_task: { type: 'noul', noul: 0.9 },
+          injection_suspect: { type: 'noul', noul: 0.01 },
+        },
+      }),
+    }))
+    // conf 0.8 >= 0.6：中风险转人工。
+    expect((await listener(fakeExec(), nextAllow)).kind).toBe('ask')
+    // 热更新：门槛抬到 0.9，同一答案集直接放行——无需重建监听器。
+    thresholds.confidenceMin = 0.9
+    expect((await listener(fakeExec(), nextAllow)).kind).toBe('allow')
   })
 })

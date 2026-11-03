@@ -33,6 +33,7 @@ export interface ClassifyResult {
 export type DegradeReason =
   | 'no-key'
   | 'cooldown'
+  | 'cost-limit'
   | 'aborted'
   | 'timeout'
   | 'http-error'
@@ -47,6 +48,8 @@ export interface JevClientOptions {
   readonly failureThreshold: number
   readonly maxConcurrency: number
   readonly cacheSize: number
+  /** 每日决策成本限额（USD，本地日界）；缺省 = 不限。getter 形态：与阈值热更新同一模式，改配置即生效。 */
+  readonly dailyCostLimitUsd?: () => number
   /** Resolves the API key per call; `undefined` degrades without counting a failure. */
   readonly resolveKey: () => Promise<string | undefined>
   readonly telemetry: Telemetry
@@ -111,6 +114,7 @@ export class JevClient {
   private readonly gate: CooldownGate
   private readonly semaphore: Semaphore
   private readonly cache: LruCache<string, ClassifyResult>
+  private readonly dailyCostLimitUsd: () => number
   /**
    * Degrade-telemetry throttle: a session with no key (or an open cooldown)
    * degrades on EVERY call, which would flood the log with identical rows.
@@ -118,6 +122,11 @@ export class JevClient {
    * and on every reason change.
    */
   private lastDegrade: { reason: string; at: number } | undefined
+  /**
+   * 当日成本记账（本地日界）：成功计费调用的 costUsd（估算兜底）累加；
+   * 重启清零——限额是防失控不是计费。getter 暴露给 status 面板。
+   */
+  private costToday: { day: string; spent: number } = { day: '', spent: 0 }
 
   /**
    * @param options - endpoints, budgets, key resolution, telemetry, logger.
@@ -135,6 +144,25 @@ export class JevClient {
     this.gate = new CooldownGate(options.failureThreshold, options.cooldownMs, this.now)
     this.semaphore = new Semaphore(options.maxConcurrency)
     this.cache = new LruCache(options.cacheSize)
+    this.dailyCostLimitUsd = options.dailyCostLimitUsd ?? ((): number => 0)
+  }
+
+  /** 当日已花（USD，本地日界；进程内记账，重启清零）。 */
+  costTodayUsd(): number {
+    this.rollCostDay()
+    return this.costToday.spent
+  }
+
+  /** 本地日界的 YYYY-MM-DD（现在注入时钟下取本地时区）。 */
+  private localDay(): string {
+    const date = new Date(this.now())
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  }
+
+  /** 跨天重置记账。 */
+  private rollCostDay(): void {
+    const day = this.localDay()
+    if (this.costToday.day !== day) this.costToday = { day, spent: 0 }
   }
 
   /**
@@ -159,7 +187,7 @@ export class JevClient {
         ...(call.callId === undefined ? {} : { callId: call.callId }),
         action: 'degraded',
         detail: reason,
-        ...(reason === 'no-key' || reason === 'cooldown' ? {} : { latencyMs: this.now() - started }),
+        ...(reason === 'no-key' || reason === 'cooldown' || reason === 'cost-limit' ? {} : { latencyMs: this.now() - started }),
       })
       return null
     }
@@ -167,6 +195,11 @@ export class JevClient {
     const key = await this.resolveKey()
     if (key === undefined || key.length === 0) return degrade('no-key')
     if (this.gate.open()) return degrade('cooldown')
+    // 每日成本限额：超限即降级（fail-closed），次日自动恢复。
+    this.rollCostDay()
+    if (this.dailyCostLimitUsd() > 0 && this.costToday.spent >= this.dailyCostLimitUsd()) {
+      return degrade('cost-limit')
+    }
 
     const cacheKey = createHash('sha256')
       .update(JSON.stringify([this.model, call.state, call.questions]))
@@ -193,6 +226,12 @@ export class JevClient {
     )
     if (acquired !== 'acquired') return degrade(acquired === 'aborted' ? 'aborted' : 'timeout')
     try {
+      // 排队者获得槽位后复查限额：压缩并发 TOCTOU 窗口（首批在途期间排队
+      // 的调用不再照单放行）。finally 保证槽位释放。
+      this.rollCostDay()
+      if (this.dailyCostLimitUsd() > 0 && this.costToday.spent >= this.dailyCostLimitUsd()) {
+        return degrade('cost-limit')
+      }
       const outcome = await this.request(call, key, started)
       if (typeof outcome === 'string') {
         if (outcome === 'caller-aborted') return degrade('aborted')
@@ -207,6 +246,13 @@ export class JevClient {
         cached: false,
       }
       this.cache.set(cacheKey, result)
+      // 计费调用记入当日成本：provider 上报值优先、token 估算兜底；
+      // 连 usage 都不报的 provider（自建代理）按请求体规模粗估（~4 字符/token），
+      // 保证限额对无 usage 响应也能生效。
+      this.costToday.spent += outcome.costUsd
+        ?? estimateCostUsd(outcome.inputTokens)
+        ?? estimateCostUsd(Math.max(500, Math.ceil(JSON.stringify([call.state, call.questions]).length / 4)))
+        ?? 0
       return result
     } finally {
       this.semaphore.release()

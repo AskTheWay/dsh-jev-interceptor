@@ -6,7 +6,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { CalibrationReport } from './calibrate.js'
+import { THRESHOLD_KEYS, type CalibrationReport } from './calibrate.js'
 import type { ImpactSummary } from './impact.js'
 import type { PingResult } from './jev.js'
 import { clampLogLimit, LOG_PANEL_N, type TelemetryEntry } from './telemetry.js'
@@ -22,6 +22,10 @@ export interface JevPanelStatus {
   keySource: 'config' | 'credentials' | 'env' | 'none'
   /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
   persistPath: string | null
+  /** 当日已花（USD，进程内记账）；限额见 dailyCostLimitUsd。 */
+  costTodayUsd: number
+  /** 每日成本限额（USD）；0 = 不限。 */
+  dailyCostLimitUsd: number
   guardEnabled: boolean
   preapproveEnabled: boolean
   stagnationEnabled: boolean
@@ -56,7 +60,7 @@ export function registerJevApi(
     testConnection: (apiKeyOverride?: string) => Promise<PingResult>
     /** 决策明细（/log 路由用；detail 只含枚举与数值 token，无敏感数据）。 */
     getLog: (limit: number) => Promise<TelemetryEntry[]>
-    updateConfig: (patch: Record<string, unknown>) => Promise<void>
+    updateConfig: (patch: Record<string, unknown>) => Promise<{ rejected: string[] }>
   },
 ): void {
   const connection = ctx.get('connection')
@@ -129,8 +133,10 @@ export function registerJevApi(
     fetch: async (request: Request) => {
       try {
         const body = JSON.parse(await request.text()) as Record<string, unknown>
-        // Whitelist: only these fields are updatable from the panel.
-        const allowed = ['enabled', 'mode', 'apiKey', 'provider', 'endpoint']
+        // Whitelist: toggles/credentials plus the eight calibratable thresholds
+        // (calibration's one-click apply); threshold values re-validated host-side
+        // and rejected honestly (400) when out of range.
+        const allowed = ['enabled', 'mode', 'apiKey', 'provider', 'endpoint', ...THRESHOLD_KEYS]
         const patch: Record<string, unknown> = {}
         for (const key of allowed) {
           if (Object.hasOwn(body, key)) patch[key] = body[key]
@@ -138,7 +144,10 @@ export function registerJevApi(
         if (Object.keys(patch).length === 0) {
           return json({ error: 'no updatable fields' }, 400)
         }
-        await deps.updateConfig(patch)
+        const { rejected } = await deps.updateConfig(patch)
+        if (rejected.length > 0) {
+          return json({ error: `非法值（需 0-1）: ${rejected.join(', ')}` }, 400)
+        }
         return json({ ok: true })
       } catch (error: unknown) {
         return json({ error: error instanceof Error ? error.message : String(error) }, 500)

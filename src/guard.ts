@@ -91,7 +91,11 @@ export interface GuardDeps {
   readonly live: () => LiveSettings
   readonly readOnlyTools: ReadonlySet<string>
   readonly excludeTools: ReadonlySet<string>
-  readonly thresholds: GuardThresholds
+  /**
+   * 每事件读取的阈值（函数）：面板/命令热更新阈值后下一个调用即生效，
+   * 无需重启或重挂监听器。
+   */
+  readonly thresholds: () => GuardThresholds
   readonly recentMessages: number
   readonly recentMessageChars: number
   readonly argsHeadChars: number
@@ -261,7 +265,7 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
     })
     return undefined
   }
-  const action = decideGuard(extracted, deps.thresholds)
+  const action = decideGuard(extracted, deps.thresholds())
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'guard',

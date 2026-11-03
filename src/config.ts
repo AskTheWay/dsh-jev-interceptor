@@ -41,6 +41,12 @@ export interface Config {
   maxConcurrency?: number
   /** Decision input cache capacity (default 512). */
   cacheSize?: number
+  /**
+   * 每日 Jev 决策成本限额（美元，本地日界）；0（默认）= 不限。
+   * 超限后所有决策降级回原生行为（fail-closed），次日自动恢复。
+   * 进程内记账：重启后当日累计清零（限额是防失控，不是计费）。
+   */
+  dailyCostLimitUsd?: number
   /** Directory for `telemetry.jsonl` (default `~/.dsh-jev-interceptor`). */
   telemetryDir?: string
   /** Trailing messages digested into the guard state (default 6). */
@@ -130,6 +136,7 @@ export const DEFAULTS = {
   failureThreshold: 3,
   maxConcurrency: 4,
   cacheSize: 512,
+  dailyCostLimitUsd: 0,
   recentMessages: 6,
   preapproveRecentMessages: 3,
   recentMessageChars: 300,
@@ -170,6 +177,7 @@ export const Config: z<Config> = z.object({
   failureThreshold: z.number().step(1).min(1).default(DEFAULTS.failureThreshold),
   maxConcurrency: z.number().step(1).min(1).max(8).default(DEFAULTS.maxConcurrency),
   cacheSize: z.number().step(1).min(0).default(DEFAULTS.cacheSize),
+  dailyCostLimitUsd: z.number().min(0).default(DEFAULTS.dailyCostLimitUsd),
   telemetryDir: z.string(),
   recentMessages: z.number().step(1).min(0).max(24).default(DEFAULTS.recentMessages),
   preapproveRecentMessages: z.number().step(1).min(0).max(24).default(DEFAULTS.preapproveRecentMessages),
@@ -215,6 +223,7 @@ export interface ResolvedSettings {
   readonly failureThreshold: number
   readonly maxConcurrency: number
   readonly cacheSize: number
+  readonly dailyCostLimitUsd: number
   readonly telemetryDir: string
   readonly recentMessages: number
   readonly preapproveRecentMessages: number
@@ -259,6 +268,7 @@ export function resolveSettings(config: Config): ResolvedSettings {
     failureThreshold: config.failureThreshold ?? DEFAULTS.failureThreshold,
     maxConcurrency: config.maxConcurrency ?? DEFAULTS.maxConcurrency,
     cacheSize: config.cacheSize ?? DEFAULTS.cacheSize,
+    dailyCostLimitUsd: config.dailyCostLimitUsd ?? DEFAULTS.dailyCostLimitUsd,
     // Follows the dsh home ($DSH_HOME, default ~/.dsh) so telemetry lives
     // with the rest of the harness data under a relocated home.
     telemetryDir: config.telemetryDir && config.telemetryDir.length > 0

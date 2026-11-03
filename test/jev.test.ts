@@ -205,3 +205,78 @@ describe('ping', () => {
     expect(await client.ping()).toEqual({ ok: false, latencyMs: 0, error: 'no-key' })
   })
 })
+
+describe('daily cost limit', () => {
+  const costly = (): Response => new Response(JSON.stringify({
+    model: 'jev-1.13.0',
+    answers: { is_urgent: { type: 'noul', noul: 0.95 } },
+    usage: { input_tokens: 1000, cost: 0.0002 },
+  }), { status: 200 })
+
+  async function limitedClient(now?: () => number): Promise<{ client: JevClient; dir: string }> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-test-'))
+    const client = new JevClient({
+      endpoint: 'https://example.test/decisions',
+      model: 'jev-latest',
+      timeoutMs: 1500,
+      cooldownMs: 60_000,
+      failureThreshold: 2,
+      maxConcurrency: 4,
+      cacheSize: 512,
+      dailyCostLimitUsd: (): number => 0.0005,
+      resolveKey: async () => 'test-key',
+      telemetry: new Telemetry(dir),
+      logger: { warn: () => {} },
+      fetchFn: async () => costly(),
+      ...(now === undefined ? {} : { now }),
+    })
+    return { client, dir }
+  }
+
+  // 每次唯一 state：绕过 LRU 决策缓存（缓存命中不计费，测不出限额）。
+  let seq = 0
+  const uniqueCall = () => ({ ...call, state: { ...call.state as object, seq: seq += 1 } })
+
+  it('degrades to cost-limit once the day budget is spent, and reports spend', async () => {
+    const { client } = await limitedClient()
+    expect((await client.classify(uniqueCall()))?.costUsd).toBeCloseTo(0.0002, 10)
+    expect((await client.classify(uniqueCall()))?.costUsd).toBeCloseTo(0.0002, 10)
+    expect(client.costTodayUsd()).toBeCloseTo(0.0004, 10)
+    // 第三次：0.0004 < 0.0005 仍可调用，累计到 0.0006 超限。
+    expect((await client.classify(uniqueCall()))?.costUsd).toBeCloseTo(0.0002, 10)
+    expect(await client.classify(uniqueCall())).toBeNull()
+    expect(client.costTodayUsd()).toBeCloseTo(0.0006, 10)
+  })
+
+  it('resets the spend at the local-day boundary', async () => {
+    let t = Date.parse('2026-10-28T23:50:00')
+    const { client } = await limitedClient(() => t)
+    // 三次累计 0.0006 超过 0.0005：第四次降级。
+    expect((await client.classify(uniqueCall()))).not.toBeNull()
+    expect((await client.classify(uniqueCall()))).not.toBeNull()
+    expect((await client.classify(uniqueCall()))).not.toBeNull()
+    expect(await client.classify(uniqueCall())).toBeNull()
+    // 跨天：限额恢复。
+    t = Date.parse('2026-10-29T00:10:00')
+    expect((await client.classify(uniqueCall()))).not.toBeNull()
+    expect(client.costTodayUsd()).toBeCloseTo(0.0002, 10)
+  })
+
+  it('zero (default) means unlimited', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-test-'))
+    const client = new JevClient({
+      endpoint: 'https://example.test/decisions',
+      model: 'jev-latest',
+      timeoutMs: 1500,
+      cooldownMs: 60_000,
+      failureThreshold: 2,
+      maxConcurrency: 4,
+      cacheSize: 512,
+      resolveKey: async () => 'test-key',
+      telemetry: new Telemetry(dir),
+      logger: { warn: () => {} },
+      fetchFn: async () => costly(),
+    })
+    for (let i = 0; i < 6; i++) expect((await client.classify(call))).not.toBeNull()
+  })
+})

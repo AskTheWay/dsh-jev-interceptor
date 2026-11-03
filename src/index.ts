@@ -65,7 +65,7 @@ import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
 import { createStagnationListener, StagnationTracker, type StagnationThresholds } from './stagnation.js'
 import { registerJevApi } from './jev-api.js'
-import { approvalBucketsOf, calibrate, renderCalibration, type CalibrationReport, type ThresholdsInput } from './calibrate.js'
+import { approvalBucketsOf, calibrate, renderCalibration, THRESHOLD_KEYS, type CalibrationReport, type ThresholdsInput } from './calibrate.js'
 import {
   CalibrationHistory,
   compareWithPrevious,
@@ -108,6 +108,9 @@ export type { ImpactSummary } from './impact.js'
 export { CalibrationHistory, compareWithPrevious, shouldAppend, snapshotOf, renderComparisonLines } from './calibration-history.js'
 export type { CalibrationSnapshot, CalibrationComparison } from './calibration-history.js'
 
+/** 可经面板/命令热更新的阈值键（单一权威清单见 calibrate.ts 的 THRESHOLD_KEYS）。 */
+const CALIBRATABLE_KEYS = THRESHOLD_KEYS
+
 /** 从已解析设置提取阈值子集（校准基线，与挂点同源）。 */
 function thresholdsOf(s: ResolvedSettings): ThresholdsInput {
   return {
@@ -142,7 +145,9 @@ export function apply(ctx: Context, config: Config): void {
    */
   const buildCalibration = async (full: boolean): Promise<{ report: CalibrationReport; extras: string[] }> => {
     const entries = await telemetry.entries(full ? undefined : 2000)
-    const thresholds = thresholdsOf(settings)
+    // 基线与挂点 getter 同源（活配置）：「应用」后重新生成的报告立即以新值
+    // 为 current，采纳标记/落盘快照不与热生效事实脱节。
+    const thresholds = thresholdsOf(resolveSettings(configOverride ?? config))
     const report = calibrate(entries, thresholds)
     const buckets = approvalBucketsOf(entries)
     const history = new CalibrationHistory(settings.telemetryDir)
@@ -244,6 +249,8 @@ export function apply(ctx: Context, config: Config): void {
     failureThreshold: settings.failureThreshold,
     maxConcurrency: settings.maxConcurrency,
     cacheSize: settings.cacheSize,
+    // getter 形态：Settings 表单热改限额即生效（与 8 阈值同一模式），显示与执行同源。
+    dailyCostLimitUsd: () => resolveSettings(configOverride ?? config).dailyCostLimitUsd,
     resolveKey,
     telemetry,
     logger: ctx.logger,
@@ -265,6 +272,9 @@ export function apply(ctx: Context, config: Config): void {
         keySource: cfg.apiKey !== undefined && cfg.apiKey.length > 0 ? 'config' : 'env',
         // null = 设置服务不落盘（面板保存后据此警告"重启丢失"）。
         persistPath: settingsPersistPath(),
+        // 当日成本（进程内记账）与限额（0 = 不限）；限额读活配置（与执行同源）。
+        costTodayUsd: jev.costTodayUsd(),
+        dailyCostLimitUsd: resolveSettings(configOverride ?? config).dailyCostLimitUsd,
         guardEnabled: settings.guardEnabled,
         preapproveEnabled: settings.preapproveEnabled,
         stagnationEnabled: settings.stagnationEnabled,
@@ -278,13 +288,29 @@ export function apply(ctx: Context, config: Config): void {
     getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
     testConnection: (apiKeyOverride) => jev.ping(apiKeyOverride === undefined ? {} : { apiKeyOverride }),
     getLog: (limit) => telemetry.recentEntries(limit),
-    updateConfig: async (patch) => {
+    updateConfig: async (patch): Promise<{ rejected: string[] }> => {
+      const rejected: string[] = []
       // 先立即更新内存（getStatus 立刻能看到，无论 settings 服务是否存在）
       if (typeof patch['enabled'] === 'boolean') liveOverride = { ...live(), enabled: patch['enabled'] }
       if (patch['mode'] === 'shadow' || patch['mode'] === 'enforce') liveOverride = { ...live(), mode: patch['mode'] }
       if (typeof patch['provider'] === 'string') configOverride = { ...(configOverride ?? config), provider: patch['provider'] as Config['provider'] }
       if (typeof patch['endpoint'] === 'string') configOverride = { ...(configOverride ?? config), endpoint: patch['endpoint'] }
       if (typeof patch['apiKey'] === 'string') configOverride = { ...(configOverride ?? config), apiKey: patch['apiKey'] }
+      // 阈值字段（校准建议一键应用）：写进活配置，挂点 getter 下一个调用即生效。
+      // 非法值（非数字/越界）如实拒绝——绝不静默 200 假装成功。
+      for (const key of CALIBRATABLE_KEYS) {
+        if (!Object.hasOwn(patch, key)) continue
+        const value = patch[key]
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+          rejected.push(key)
+          continue
+        }
+        configOverride = { ...(configOverride ?? config), [key]: value as never }
+      }
+      if (rejected.length > 0) {
+        ctx.logger.warn(`dsh-jev-interceptor: rejected out-of-range config values: ${rejected.join(', ')}`)
+        return { rejected }
+      }
       // 再尽力持久化（失败不影响本次运行）
       try {
         const settingsService = ctx.get('settings')
@@ -292,6 +318,7 @@ export function apply(ctx: Context, config: Config): void {
           await settingsService.update(SETTINGS_NS, patch)
         }
       } catch { /* 内存已更新，持久化失败仅影响重启后 */ }
+      return { rejected }
     },
   })
   })
@@ -302,12 +329,17 @@ export function apply(ctx: Context, config: Config): void {
     ctx.on('tools/pre-execute', createGuardListener({
       readOnlyTools: settings.readOnlyTools,
       excludeTools: settings.excludeTools,
-      thresholds: {
-        confidenceMin: settings.guardConfidenceMin,
-        denyConfidence: settings.guardDenyConfidence,
-        irreversibleCeiling: settings.guardIrreversibleCeiling,
-        irreversibleDenyFloor: settings.guardIrreversibleDenyFloor,
-        injectionAskThreshold: settings.guardInjectionAskThreshold,
+      // 每事件从活配置读取：面板/命令应用新阈值后下一个调用即生效
+      // （resolveSettings 只在 Jev 分类成功后调用一次，分配成本可忽略）。
+      thresholds: () => {
+        const t = thresholdsOf(resolveSettings(configOverride ?? config))
+        return {
+          confidenceMin: t.guardConfidenceMin,
+          denyConfidence: t.guardDenyConfidence,
+          irreversibleCeiling: t.guardIrreversibleCeiling,
+          irreversibleDenyFloor: t.guardIrreversibleDenyFloor,
+          injectionAskThreshold: t.guardInjectionAskThreshold,
+        }
       },
       recentMessages: settings.recentMessages,
       recentMessageChars: settings.recentMessageChars,
@@ -325,10 +357,13 @@ export function apply(ctx: Context, config: Config): void {
   if (settings.preapproveEnabled) {
     ctx.on('approval/request', createPreapproveListener({
       allowlist: settings.preapproveToolAllowlist,
-      thresholds: {
-        autoApproveMin: settings.preapproveAutoApproveMin,
-        irreversibleMax: settings.preapproveIrreversibleMax,
-        injectionSuspectMax: settings.preapproveInjectionSuspectMax,
+      thresholds: () => {
+        const t = thresholdsOf(resolveSettings(configOverride ?? config))
+        return {
+          autoApproveMin: t.preapproveAutoApproveMin,
+          irreversibleMax: t.preapproveIrreversibleMax,
+          injectionSuspectMax: t.preapproveInjectionSuspectMax,
+        }
       },
       recentMessages: settings.preapproveRecentMessages,
       recentMessageChars: settings.recentMessageChars,
@@ -480,6 +515,9 @@ export function apply(ctx: Context, config: Config): void {
           `  源     ${config.provider ?? 'typesafe'}`,
           `  模型   ${model}`,
           `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}  停滞 ${settings.stagnationEnabled ? '✅' : '❌'}`,
+          resolveSettings(configOverride ?? config).dailyCostLimitUsd > 0
+            ? `  成本   今日 $${jev.costTodayUsd().toFixed(6)} / 限额 $${resolveSettings(configOverride ?? config).dailyCostLimitUsd.toFixed(2)}${jev.costTodayUsd() >= resolveSettings(configOverride ?? config).dailyCostLimitUsd ? '（已超限，降级中）' : ''}`
+            : '',
           `  Key    ${config.apiKey !== undefined && config.apiKey.length > 0 ? '✅ 已配置' : (await resolveKey()) !== undefined ? '✅ 环境变量' : '❌ 未配置（运行 /jev-key <key>）'}`,
           settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
           '  控制: /jev-on /jev-off /jev-mode',
