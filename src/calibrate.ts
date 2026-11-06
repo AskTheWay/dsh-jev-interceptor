@@ -14,6 +14,7 @@
  * @module dsh-jev-interceptor/calibrate
  */
 
+import { translate, type Locale, type MessageKey } from './localization.js'
 import type { ResolvedSettings } from './config.js'
 import {
   decideGuard,
@@ -434,10 +435,12 @@ const READINESS_MIN_SAMPLES = 30
 const READINESS_MAX_DEGRADED_RATE = 0.3
 
 /**
- * 评估影子数据是否支持切到执行模式。纯函数。
- * @param entries - 遥测记录窗口。
+ * Assess whether shadow data supports promoting to enforce mode. Pure function.
+ * @param entries - telemetry window.
+ * @param locale - report language (default Chinese for legacy callers).
  */
-export function assessReadiness(entries: readonly TelemetryEntry[]): ShadowReadiness {
+export function assessReadiness(entries: readonly TelemetryEntry[], locale: Locale = 'zh'): ShadowReadiness {
+  const t = (key: MessageKey, values?: Record<string, string | number>): string => translate(locale, key, values)
   let shadow = 0
   let degraded = 0
   let misApprovals = 0
@@ -450,29 +453,35 @@ export function assessReadiness(entries: readonly TelemetryEntry[]): ShadowReadi
   }
   const degradedRate = shadow > 0 ? degraded / shadow : 0
   const reasons: string[] = []
-  if (shadow < READINESS_MIN_SAMPLES) reasons.push(`影子样本 ${String(shadow)} 条（< ${String(READINESS_MIN_SAMPLES)}）`)
-  if (misApprovals > 0) reasons.push(`影子期出现 ${String(misApprovals)} 次「Jev 会批、人拒绝」`)
-  if (degradedRate > READINESS_MAX_DEGRADED_RATE) reasons.push(`降级率 ${(degradedRate * 100).toFixed(0)}%（> 30%）`)
+  if (shadow < READINESS_MIN_SAMPLES) {
+    reasons.push(t('msg.readinessShadowSamples', { v0: shadow, v1: READINESS_MIN_SAMPLES }))
+  }
+  if (misApprovals > 0) reasons.push(t('msg.readinessMisApprovals', { v0: misApprovals }))
+  if (degradedRate > READINESS_MAX_DEGRADED_RATE) {
+    reasons.push(t('msg.readinessDegraded', { v0: (degradedRate * 100).toFixed(0) }))
+  }
   return {
     shadowSamples: shadow,
     misApprovals,
     degradedRate,
     ready: reasons.length === 0 && shadow > 0,
     reason: reasons.length === 0
-      ? '影子数据健康：零误批倾向、降级率正常，建议切到执行模式'
-      : `继续观察：${reasons.join('；')}`,
+      ? t('msg.readinessReady')
+      : t('msg.readinessContinue', { v0: reasons.join(locale === 'zh' ? '；' : '; ') }),
   }
 }
 
 // ── 主分析 ───────────────────────────────────────────────────────────────
 
 /**
- * 分析影子遥测，产出阈值建议报告。纯函数：不 IO、不调 Jev、永不抛。
- * @param entries - 遥测记录窗口（全量或尾部 N 条）。
- * @param current - 当前生效阈值（与四个挂点同一 settings 快照）。
- * @returns 校准报告。
+ * Analyze telemetry and suggest thresholds without IO or Jev requests.
+ * @param entries - Full telemetry window or its latest N records.
+ * @param current - Active settings shared with the decision hooks.
+ * @param locale - Report language; defaults to Chinese for existing CLI callers.
+ * @returns Calibration advice, insufficient samples, and observations.
  */
-export function calibrate(entries: readonly TelemetryEntry[], current: ThresholdsInput): CalibrationReport {
+export function calibrate(entries: readonly TelemetryEntry[], current: ThresholdsInput, locale: Locale = 'zh'): CalibrationReport {
+  const t = (key: MessageKey, values?: Record<string, string | number>): string => translate(locale, key, values)
   const guardEntries = entries.filter(e => e.tag === 'guard')
   const preapproveEntries = entries.filter(e => e.tag === 'preapprove')
   const loopEntries = entries.filter(e => e.tag === 'approval-loop')
@@ -501,7 +510,7 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
       hasLegacySamples: false,
       advice,
       insufficient,
-      observations: [{ param: '—', reason: '暂无数据：先 /jev-on 启用插件跑一段会话，再回来校准' }],
+      observations: [{ param: '—', reason: t('calibration.noData') }],
     }
   }
 
@@ -519,41 +528,41 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
       if (bucketTotal >= MIN_DANGER) {
         pushAdvice(advice, observations, 'preapproveAutoApproveMin', current.preapproveAutoApproveMin, true,
           (_suggested, delta) => ({
-            basis: `误批风险 ${woap} 次（Jev 想自动批、人拒绝）/ 一致率样本 ${bucketTotal} 条`,
+            basis: t('calibration.overApprovalBasis', { v0: woap, v1: bucketTotal }),
             samples: bucketTotal,
-            note: `收紧自动批门槛（${stepText(delta)}），减少误批；代价是多一些人工确认。已出现危险信号，≥${MIN_DANGER} 条样本即建议（收紧方向永不放宽权限）`,
+            note: t('calibration.tightenPreapproval', { v0: stepText(delta), v1: MIN_DANGER }),
           }),
-          `preapproveAutoApproveMin 已达收紧建议上限 ${fmt(CLAMP[1])}：误批信号仍存续，应收窄 preapproveToolAllowlist 或关闭 preapproveEnabled，而非继续抬门`)
+          t('calibration.preapprovalUpperBound', { v0: fmt(CLAMP[1]) }))
       } else {
         insufficient.push({
           param: 'preapproveAutoApproveMin',
-          reason: `已出现误批风险信号（${woap} 次）但一致率样本仅 ${bucketTotal} 条（< ${MIN_DANGER}），继续观察`,
+          reason: t('calibration.overApprovalSamples', { v0: woap, v1: bucketTotal, v2: MIN_DANGER }),
         })
       }
     } else if (friction + alignedApprove >= MIN_SAMPLES && friction / (friction + alignedApprove) >= FRICTION_HOT) {
       // R2 放松方向：零误批 + 足样本 + friction 占比高，才允许降门槛。
       pushAdvice(advice, observations, 'preapproveAutoApproveMin', current.preapproveAutoApproveMin, false,
         (_suggested, delta) => ({
-          basis: `零误批，且 ${friction} 次转人工后人类全部放行（占放行类 ${(friction / (friction + alignedApprove) * 100).toFixed(0)}%）`,
+          basis: t('calibration.frictionBasis', { v0: friction, v1: (friction / (friction + alignedApprove) * 100).toFixed(0) }),
           samples: friction + alignedApprove,
-          note: `放松自动批门槛（${stepText(delta)}）减少多余人工确认；前提是零误批，一旦再次出现误批信号立即回调`,
+          note: t('calibration.relaxPreapproval', { v0: stepText(delta) }),
         }),
-        `preapproveAutoApproveMin 已达放松建议下限 ${fmt(CLAMP[0])}：friction 仍高时检查预批问题面，而非继续降门`)
+        t('calibration.preapprovalLowerBound', { v0: fmt(CLAMP[0]) }))
     } else if (friction > 0) {
       observations.push({
         param: 'preapproveAutoApproveMin',
-        reason: `friction（Jev 转人工、人放行）${friction} 次但样本不足 ${MIN_SAMPLES} 或占比未达 ${FRICTION_HOT * 100}%，暂不建议放松`,
+        reason: t('calibration.frictionSamples', { v0: friction, v1: MIN_SAMPLES, v2: FRICTION_HOT * 100 }),
       })
     }
   } else if (preapproveDegraded > 0) {
     observations.push({
       param: 'preapprove*',
-      reason: `预批 ${preapproveDegraded} 条全部降级（多为 answer-shape-mismatch）：Jev 应答持续不可解析，预批实际失效——先排查 provider/应答格式（/jev-log 看 detail），而非 allowlist 配置`,
+      reason: t('calibration.preapprovalDegraded', { v0: preapproveDegraded }),
     })
   } else if (preapproveEntries.length === 0) {
     observations.push({
       param: 'preapprove*',
-      reason: '预批无样本：preapproveToolAllowlist 为空时不产生自动批评估，一致率桶也随之为空',
+      reason: t('calibration.preapprovalNoSamples'),
     })
   }
 
@@ -566,11 +575,11 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
       // R5 拦截过敏感：deny 占比过高。
       pushAdvice(advice, observations, 'guardDenyConfidence', current.guardDenyConfidence, true,
         (_suggested, delta) => ({
-          basis: `deny ${denyTotal}/${guard.length} 次（>${DENY_HOT * 100}%），拦截占比偏高`,
+          basis: t('calibration.denyBasis', { v0: denyTotal, v1: guard.length, v2: DENY_HOT * 100 }),
           samples: guard.length,
-          note: `提高硬拦截门槛（${stepText(delta)}），让更多高风险走人工确认而非直接拦；代价是少量不可逆调用少了一道硬闸`,
+          note: t('calibration.raiseDeny', { v0: stepText(delta) }),
         }),
-        `guardDenyConfidence 已达收紧建议上限 ${fmt(CLAMP[1])}：deny 仍过热，考虑检查 excludeTools/readOnlyTools 覆盖面或 guardEnable 本身`)
+        t('calibration.denyUpperBound', { v0: fmt(CLAMP[1]) }))
     } else if (denyTotal === 0) {
       // R6 风险门 0 deny：high 样本存在但都落在 ask——重放降门看能否产生少量 deny。
       const highCount = guard.filter(s => s.risk === 'high').length
@@ -588,21 +597,21 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
           const from = param === 'guardDenyConfidence' ? current.guardDenyConfidence : current.guardIrreversibleDenyFloor
           pushAdvice(advice, observations, param, from, false,
             (_suggested, delta) => ({
-              basis: `0 次 deny、high 风险样本 ${highCount} 个全部走人工；反事实重放降门后会产生 ${pick.replay.actions.deny} 次 deny（≤${REPLAY_DENY_CAP * 100}% 上限内）`,
+              basis: t('calibration.replayBasis', { v0: highCount, v1: pick.replay.actions.deny, v2: REPLAY_DENY_CAP * 100 }),
               samples: guard.length,
-              note: `下调硬拦截门槛（${stepText(delta)}）让明确的高风险不可逆调用被直接拦下，减少审批疲劳；人工确认仍兜底其余高风险`,
+              note: t('calibration.lowerDeny', { v0: stepText(delta) }),
             }),
-            `${param} 已达放松建议下限 ${fmt(CLAMP[0])}：0 deny 且 high 样本仍在，考虑收窄依赖人工确认的范围或检查工具面风险构成`)
+            t('calibration.denyLowerBound', { v0: param, v1: fmt(CLAMP[0]) }))
         } else {
           observations.push({
             param: 'guardDenyConfidence / guardIrreversibleDenyFloor',
-            reason: `0 次 deny、high 样本 ${highCount} 个，但反事实重放降门仍不产生 deny（或超过 ${REPLAY_DENY_CAP * 100}% 上限）——维持现状`,
+            reason: t('calibration.replayNoChange', { v0: highCount, v1: REPLAY_DENY_CAP * 100 }),
           })
         }
       } else {
         observations.push({
           param: 'guardDenyConfidence',
-          reason: `0 次 deny 且 high 样本仅 ${highCount} 个（<5）：可能工具面确实低危，或 excludeTools/readOnlyTools 覆盖过宽，先检查覆盖面`,
+          reason: t('calibration.highRiskSamples', { v0: highCount }),
         })
       }
     }
@@ -614,50 +623,50 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
         // R3 中风险升级过多。
         pushAdvice(advice, observations, 'guardConfidenceMin', current.guardConfidenceMin, true,
           (_suggested, delta) => ({
-            basis: `ask ${askTotal}/${guard.length} 次（>${ASK_HOT * 100}%），其中中风险升级 ${branches.medium} 次占过半`,
+            basis: t('calibration.mediumRiskBasis', { v0: askTotal, v1: guard.length, v2: ASK_HOT * 100, v3: branches.medium }),
             samples: guard.length,
-            note: `提高中风险升级的置信门槛（${stepText(delta)}），减少转人工；代价是置信度偏低的中风险调用会直接放行`,
+            note: t('calibration.raiseConfidence', { v0: stepText(delta) }),
           }),
-          `guardConfidenceMin 已达收紧建议上限 ${fmt(CLAMP[1])}：中风险升级仍过热，考虑扩大 readOnlyTools 或检查任务面是否天然中危`)
+          t('calibration.confidenceUpperBound', { v0: fmt(CLAMP[1]) }))
       } else if (branches.irreversibility >= branchTotal / 2) {
         // R4 低风险不可逆升级过多。
         pushAdvice(advice, observations, 'guardIrreversibleCeiling', current.guardIrreversibleCeiling, true,
           (_suggested, delta) => ({
-            basis: `ask ${askTotal}/${guard.length} 次（>${ASK_HOT * 100}%），其中低风险不可逆 ${branches.irreversibility} 次占过半`,
+            basis: t('calibration.irreversibleBasis', { v0: askTotal, v1: guard.length, v2: ASK_HOT * 100, v3: branches.irreversibility }),
             samples: guard.length,
-            note: `提高不可逆升级上限（${stepText(delta)}），容忍更高的「可能不可逆」概率；代价是少量实际不可逆的低风险调用不再升级`,
+            note: t('calibration.raiseCeiling', { v0: stepText(delta) }),
           }),
-          `guardIrreversibleCeiling 已达收紧建议上限 ${fmt(CLAMP[1])}：低风险不可逆升级仍过热，考虑检查工具面是否天然不可逆`)
+          t('calibration.ceilingUpperBound', { v0: fmt(CLAMP[1]) }))
       } else if (branches.injection >= branchTotal / 2) {
         // 注入嫌疑占过半：注入防线只观察不给数值建议（不放松），单独归因。
         observations.push({
           param: 'guardInjectionAskThreshold / preapproveInjectionSuspectMax',
-          reason: `ask ${askTotal}/${guard.length} 次偏高，过半来自注入嫌疑升级（${branches.injection} 次）——注入防线参数只观察不给数值建议，当前阈值继续有效`,
+          reason: t('calibration.injectionDominant', { v0: askTotal, v1: guard.length, v2: branches.injection }),
         })
       } else {
         observations.push({
           param: 'guardConfidenceMin / guardIrreversibleCeiling',
-          reason: `ask ${askTotal}/${guard.length} 次偏高，但触发分散（中风险 ${branches.medium}、低风险不可逆 ${branches.irreversibility}、高风险 ${branches.high}、注入 ${branches.injection}），无单一过半分支`,
+          reason: t('calibration.mixedTriggers', { v0: askTotal, v1: guard.length, v2: branches.medium, v3: branches.irreversibility, v4: branches.high, v5: branches.injection }),
         })
       }
     }
     if (replay.actions.delegate === guard.length) {
       observations.push({
         param: 'guard*',
-        reason: `${guard.length} 条样本全部 delegate：风险门形同虚设——要么会话确实全低危，要么 readOnlyTools/excludeTools 覆盖过宽，检查后再判断`,
+        reason: t('calibration.allDelegated', { v0: guard.length }),
       })
     }
     const injectionBranch = replay.branches.injection
     if (injectionBranch > 0) {
       observations.push({
         param: 'guardInjectionAskThreshold / preapproveInjectionSuspectMax',
-        reason: `窗口内 ${injectionBranch} 次注入嫌疑升级——注入防线参数只观察不给数值建议（防线不放松），当前值继续有效`,
+        reason: t('calibration.injectionObservation', { v0: injectionBranch }),
       })
     }
   } else {
     insufficient.push({
       param: 'guard*',
-      reason: `guard 样本 ${guard.length} 条（< ${MIN_SAMPLES}），不足以给风险门建议`,
+      reason: t('calibration.guardSamples', { v0: guard.length, v1: MIN_SAMPLES }),
     })
   }
 
@@ -665,13 +674,13 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
   if (shadow > 0 && enforce > 0) {
     observations.push({
       param: '—',
-      reason: `窗口混合 shadow（${shadow}）与 enforce（${enforce}）记录：enforce 期自动批过的调用不进一致率桶，切换阈值前建议重跑一段 shadow`,
+      reason: t('calibration.mixedModes', { v0: shadow, v1: enforce }),
     })
   }
   if (hasLegacySamples) {
     observations.push({
       param: '—',
-      reason: '窗口含旧格式记录（无 scores 字段，回退 detail 解析，数值精度 0.01）',
+      reason: t('calibration.legacyRecords'),
     })
   }
 

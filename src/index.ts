@@ -19,6 +19,7 @@
  * @module dsh-jev-interceptor
  */
 
+import type { Locale } from './localization.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -140,17 +141,17 @@ export function apply(ctx: Context, config: Config): void {
   const approvalTrace = new ApprovalTrace()
 
   /**
-   * 生成一份校准报告并落一份快照：读上一份快照对比「上次建议 → 是否采纳
-   * → 桶变化」，再把本次快照追加进历史（5 分钟去抖）。命令与面板共用；
-   * 定义在 apply 内以闭包 telemetry 与 settings（与挂点同一实例）。
+   * Build a localized report, compare the previous advice with active thresholds,
+   * and append a history snapshot with a five-minute debounce.
+   * Shared by CLI commands and the panel using the same telemetry and settings.
    */
-  const buildCalibration = async (full: boolean): Promise<{ report: CalibrationReport; extras: string[] }> => {
+  const buildCalibration = async (full: boolean, locale: Locale = 'zh'): Promise<{ report: CalibrationReport; extras: string[] }> => {
     const entries = await telemetry.entries(full ? undefined : 2000)
     // 基线与挂点 getter 同源（活配置）：「应用」后重新生成的报告立即以新值
     // 为 current，采纳标记/落盘快照不与热生效事实脱节。
     const thresholds = thresholdsOf(resolveSettings(configOverride ?? config))
     const liveAllowlist = resolveSettings(configOverride ?? config).preapproveToolAllowlist
-    const report = calibrate(entries, thresholds)
+    const report = calibrate(entries, thresholds, locale)
     // 预批准候选：从 guard 影子数据推导，只推不在名单里的新工具。
     const suggestions = suggestAllowlist(entries).filter(s => !liveAllowlist.has(s.tool))
     const reportWithSuggestions: CalibrationReport = suggestions.length === 0
@@ -292,7 +293,7 @@ export function apply(ctx: Context, config: Config): void {
     getStats: () => telemetry.statsData(500),
     // 校准基线用与四个挂点同一份 settings 快照：报告的「当前值」= 实际执行值。
     // 每次生成都会与上一份快照对比（采纳/忽略/桶变化）并落一份新快照。
-    getCalibration: async (): Promise<CalibrationReport> => (await buildCalibration(false)).report,
+    getCalibration: async (locale): Promise<CalibrationReport> => (await buildCalibration(false, locale)).report,
     // 面板每 20s 自动刷新会打这个端点：尾部窗口而非全量（/jev-impact 命令才是全量）。
     getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
     testConnection: (apiKeyOverride) => jev.ping(apiKeyOverride === undefined ? {} : { apiKeyOverride }),

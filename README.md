@@ -23,7 +23,7 @@ English | [中文](README.zh.md)
   <img src="imgs/image-5.png" width="32%" alt="Settings with provider picker and connection test">
 </p>
 
-> The Web panel (sidebar ⚡ → Jev 决策): live KPIs and net-benefit card, a filterable decision log with full evidence per row, shadow-data threshold advice that tracks whether you adopted it, and one-click connection test. Every screenshot above is the real plugin running real decisions.
+> The Web panel (sidebar ⚡ → Jev decisions): live KPIs and net-benefit card, a filterable decision log with full evidence per row, shadow-data threshold advice that tracks whether you adopted it, and one-click connection test. Every screenshot above is the real plugin running real decisions. Use the English / 中文 button next to Refresh to switch the panel language. The first visit follows the browser language (English for unsupported languages); your choice is saved in the browser.
 
 **What it does, in one breath:** before a tool call runs, Jev classifies its risk, irreversibility, task-fit, and injection-suspicion in one ~$0.00002 request — confident high-risk calls get denied, medium ones escalate to a human, and clearly-granted reversible ones stop wasting your clicks on approval dialogs. And when an `@session` snapshot gets injected, Jev scores every message's value for the citing task so the **error traceback survives the byte budget instead of the oldest small talk**. Every doubt, every timeout, every missing key degrades to stock dsh behavior. Nothing to configure away, nothing that can widen a permission.
 

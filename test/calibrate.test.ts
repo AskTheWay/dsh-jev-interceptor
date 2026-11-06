@@ -355,3 +355,24 @@ describe('assessReadiness', () => {
     expect(degraded.reason).toContain('降级率')
   })
 })
+
+describe('calibration localization', () => {
+  it('translates report copy while preserving threshold decisions and sample counts', () => {
+    const entries = Array.from({ length: 30 }, () => loopEntry('would-over-approve'))
+    const chinese = calibrate(entries, current)
+    const english = calibrate(entries, current, 'en')
+    expect(english.counts).toEqual(chinese.counts)
+    expect(english.modeSplit).toEqual(chinese.modeSplit)
+    expect(english.advice.map(({ basis: _basis, note: _note, ...decision }) => decision))
+      .toEqual(chinese.advice.map(({ basis: _basis, note: _note, ...decision }) => decision))
+    expect(english.advice[0].basis).toContain('30 over-approval risks')
+    expect(english.advice[0].note).toContain('+0.05')
+    expect(JSON.stringify(english)).not.toMatch(/\p{Script=Han}/u)
+    expect(JSON.stringify(chinese)).toMatch(/\p{Script=Han}/u)
+  })
+
+  it('translates the no-data report', () => {
+    expect(calibrate([], current, 'en').observations[0].reason).toContain('No data yet')
+  })
+})
+

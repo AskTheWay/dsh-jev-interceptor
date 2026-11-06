@@ -18,7 +18,8 @@
     "skipLibCheck": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
   },
   "include": [
     "src"
