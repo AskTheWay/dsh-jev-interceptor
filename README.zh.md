@@ -74,7 +74,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 /jev-stats              # 看它怎么判，含完整概率分布
 /jev-log 20 --json      # 最近 N 条决策明细；--json/--csv 导出原始数据
 /jev-impact             # 底线数字：省掉的点击、拦截、成本与延迟
-/jev-calibrate          # 影子数据阈值建议（绝不自动应用）
+/jev-calibrate          # 影子数据阈值建议（面板一键应用）
+/jev-allowlist          # 预批准名单：查看影子推荐、加/删工具
 /jev-mode enforce       # 数字满意后升级
 /jev-off                # 回到原生行为
 ```
@@ -92,11 +93,11 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 
 ## 收据（真实使用数据，非跑分）
 
-五周的自用（2026-09-22 → 10-27，15 个活跃日、7 个会话、272 次判断——`/jev-impact` 随时从你自己的遥测渲染这张表）：
+六周的自用（2026-09-22 → 11-07，19 个活跃日、10 个会话、310 次判断——`/jev-impact` 随时从你自己的遥测渲染这张表）：
 
-- 预批准路径从未触发，误批指标**尚无样本**（0/0，如实显示「无样本」而不是「0」）——实际被检验的是：6 次不确定调用转人工、0 次高风险漏拦
-- 决策总成本 **$0.0068**（143 次计费判断共 162,425 input tokens；p50 1110ms、p95 1503ms——上面的截图正是同一窗口）
-- 128 次判断降级回原生行为（大部分窗口没配 key、9 次超时），**行为零差异**——fail-closed 说到做到
+- 预批准路径尚未触发（名单有意保持为空——guard 遥测显示每个候选工具的历史上都至少有一次中风险或注入嫌疑判定，推荐器诚实地一个都不推荐），误批指标**尚无样本**（0/0，如实显示「无样本」而不是「0」）——实际被检验的是：8 次不确定调用转人工、0 次高风险漏拦
+- 决策总成本 **$0.0090**（180 次计费判断共 214,323 input tokens）
+- 129 次判断降级回原生行为，**行为零差异**——fail-closed 说到做到
 
 校准自带闭环：每次 `/jev-calibrate` 都会留一份报告快照；下次运行会告诉你上次哪些建议被采纳（`✓`）、未采纳（`·`）、被手动改写（`↔`），以及一致率桶怎么变。
 
@@ -113,7 +114,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`），带 `callId` 关联与供校准重放的全精度 `scores` 数值；日志超 20MB 自动轮转。`/jev-stats` 按挂点汇总、`/jev-log` 看单条明细、Web 面板全部图表化。
 - **校准而非拍脑袋。** `/jev-calibrate` 把影子遥测喂给*同一个*决策矩阵做反事实重放，输出阈值调整建议（±0.05 步长、常规建议 ≥30 样本——出现误批危险信号时 ≥10 条即建议收紧，仅收紧方向；注入阈值永不放松、绝不自动应用）。
 
-以上全部由 **130 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
+以上全部由 **169 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
 
 ## 配置
 
@@ -157,7 +158,7 @@ OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用�
 ```sh
 npm install --legacy-peer-deps   # devDeps 钉在当前一代 dsh API
 npm run typecheck                # src + tests，对真实 @deepseek-ai 类型
-npm test                         # vitest，130 个测试，无需网络
+npm test                         # vitest，169 个测试，无需网络
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # 对真实 provider 跑一次决策
 ```

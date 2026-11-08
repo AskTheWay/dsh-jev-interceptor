@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  calibrate,
+  calibrate, assessReadiness, suggestAllowlist,
   guardBranchOf,
   guardSampleOf,
   parseGuardDetail,
@@ -289,5 +289,69 @@ describe('renderCalibration', () => {
   it('renders the empty-window placeholder without sections', () => {
     const text = renderCalibration(calibrate([], current))
     expect(text).toContain('暂无数据')
+  })
+})
+
+describe('suggestAllowlist', () => {
+  function guardEntry(tool: string, risk: 'low' | 'medium' | 'high', p: number, irrev: number, inj = 0.02): import('../src/telemetry.js').TelemetryEntry {
+    return {
+      ts: '2026-11-01T00:00:00.000Z', tag: 'guard', mode: 'shadow', tool, action: 'delegate',
+      detail: `risk=${risk} p=${p.toFixed(2)} irrev=${irrev.toFixed(2)} task=0.90 inj=${inj.toFixed(2)}`,
+      scores: { risk_p: p, irrev, task: 0.9, inj },
+    }
+  }
+
+  it('recommends tools whose entire history is confident-low-risk-reversible-clean', () => {
+    const out = suggestAllowlist([
+      ...Array.from({ length: 6 }, () => guardEntry('read', 'low', 0.93, 0.05)),
+      ...Array.from({ length: 4 }, () => guardEntry('bash', 'low', 0.6, 0.05)),
+      ...Array.from({ length: 9 }, () => guardEntry('write', 'low', 0.93, 0.05)),
+      guardEntry('write', 'medium', 0.8, 0.1),
+      ...Array.from({ length: 3 }, () => guardEntry('grep', 'low', 0.93, 0.05)),
+    ])
+    // read：6 条全 low 达标；write：有一次 medium 出局；bash：置信不足出局；grep：样本 <5 出局。
+    expect(out.map(s => s.tool)).toEqual(['read'])
+    expect(out[0]).toMatchObject({ samples: 6, avgConfidence: 0.93, maxInjection: 0.02 })
+  })
+
+  it('excludes tools with a single injection-suspect sample', () => {
+    const out = suggestAllowlist([
+      ...Array.from({ length: 5 }, () => guardEntry('read', 'low', 0.93, 0.05)),
+      guardEntry('read', 'low', 0.93, 0.05, 0.4),
+    ])
+    expect(out).toHaveLength(0)
+  })
+
+  it('returns empty for an empty window', () => {
+    expect(suggestAllowlist([])).toEqual([])
+  })
+})
+
+describe('assessReadiness', () => {
+  function entry(mode: string, action: string, tag = 'guard', detail = ''): import('../src/telemetry.js').TelemetryEntry {
+    return { ts: '2026-11-01T00:00:00.000Z', tag: tag as never, mode: mode as never, action: action as never, detail }
+  }
+
+  it('is ready with enough healthy shadow samples', () => {
+    const entries = [
+      ...Array.from({ length: 32 }, () => entry('shadow', 'delegate')),
+      entry('shadow', 'degraded'),
+    ]
+    const r = assessReadiness(entries)
+    expect(r.ready).toBe(true)
+    expect(r.reason).toContain('建议切到执行')
+  })
+
+  it('blocks on insufficient samples, shadow mis-approvals, or high degrade rate', () => {
+    expect(assessReadiness(Array.from({ length: 5 }, () => entry('shadow', 'delegate'))).ready).toBe(false)
+    const woap = assessReadiness([
+      ...Array.from({ length: 40 }, () => entry('shadow', 'delegate')),
+      entry('shadow', 'agreement', 'approval-loop', 'jev=auto-approve human=rejected would-over-approve'),
+    ])
+    expect(woap.ready).toBe(false)
+    expect(woap.reason).toContain('Jev 会批、人拒绝')
+    const degraded = assessReadiness(Array.from({ length: 40 }, (_, i) => entry('shadow', i % 2 === 0 ? 'degraded' : 'delegate')))
+    expect(degraded.ready).toBe(false)
+    expect(degraded.reason).toContain('降级率')
   })
 })

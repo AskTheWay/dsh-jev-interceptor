@@ -74,7 +74,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 /jev-stats              # watch what it decides, with full probability distributions
 /jev-log 20 --json      # the last N decisions, one per line; --json/--csv export
 /jev-impact             # the bottom line: clicks saved, denials, cost, latency
-/jev-calibrate          # shadow-data threshold advice (never auto-applies)
+/jev-calibrate          # shadow-data threshold advice — apply with one click
+/jev-allowlist          # pre-approve allowlist: view suggestions, add/remove tools
 /jev-mode enforce       # promote once the numbers look right
 /jev-off                # back to stock behavior
 ```
@@ -92,11 +93,11 @@ Happy with the numbers? Flip `mode: enforce`. That's the whole rollout plan — 
 
 ## Receipts (real usage, not benchmarks)
 
-Five weeks of dogfooding (2026-09-22 → 10-27, 15 active days, 7 sessions, 272 decisions — `/jev-impact` renders this from your own telemetry any time):
+Six weeks of dogfooding (2026-09-22 → 11-07, 19 active days, 10 sessions, 310 decisions — `/jev-impact` renders this from your own telemetry any time):
 
-- the pre-approve path never fired, so the mis-approval metric has **no samples yet** (0/0, honestly rendered as "无样本" rather than "0") — what *was* exercised: 6 uncertain calls escalated to the human, 0 high-risk calls missed
-- total decision cost: **$0.0068** (162,425 input tokens across 143 billed decisions; p50 1110ms, p95 1503ms — the screenshots above are this same window)
-- 128 decisions degraded to stock behavior (no key for most of the window, 9 timeouts) at **zero behavioral cost** — the fail-closed posture doing exactly what it promises
+- the pre-approve path has not fired yet (allowlist still empty on purpose — the guard telemetry shows every candidate tool has at least one past medium-risk or injection-suspect call, so the recommender honestly recommends nothing), so the mis-approval metric has **no samples yet** (0/0, honestly rendered as "无样本" rather than "0") — what *was* exercised: 8 uncertain calls escalated to the human, 0 high-risk calls missed
+- total decision cost: **$0.0090** (214,323 input tokens across 180 billed decisions)
+- 129 decisions degraded to stock behavior at **zero behavioral cost** — the fail-closed posture doing exactly what it promises
 
 Calibration closes its own loop: every `/jev-calibrate` run snapshots the report; the next run tells you which of its previous suggestions you adopted (`✓ 已采纳`), ignored, or manually overrode (`↔`), and how the agreement buckets moved since.
 
@@ -113,7 +114,7 @@ Calibration closes its own loop: every `/jev-calibrate` run snapshots the report
 - **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`), with `callId` correlation and full-precision `scores` for calibration replays; the log rotates at 20 MB. `/jev-stats` aggregates per hook, `/jev-log` shows per-decision detail, and the Web panel charts it all.
 - **Calibratable, not guessed.** `/jev-calibrate` replays your shadow telemetry through the *same* decision matrix and suggests threshold moves (±0.05 steps, ≥30 samples for routine moves — ≥10 once a mis-approval danger signal appears, tighten-only; injection thresholds never relaxed, nothing auto-applied).
 
-All of this is enforced by **130 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
+All of this is enforced by **169 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
 
 ## Configure
 
@@ -157,7 +158,7 @@ The client speaks the plain `state + questions` wire shape shared by TypeSafe di
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
 npm run typecheck                # src + tests, against real @deepseek-ai types
-npm test                         # vitest, 130 tests, no network
+npm test                         # vitest, 169 tests, no network
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # one real decision against a live provider
 ```

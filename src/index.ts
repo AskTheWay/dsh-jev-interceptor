@@ -47,6 +47,7 @@ const jevKeyDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-ke
 const jevCalibrateDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-calibrate' as CommandDefinitionIdBrand
 const jevLogDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-log' as CommandDefinitionIdBrand
 const jevImpactDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-impact' as CommandDefinitionIdBrand
+const jevAllowlistDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:jev-allowlist' as CommandDefinitionIdBrand
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import {
   Config,
@@ -65,7 +66,7 @@ import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
 import { createStagnationListener, StagnationTracker, type StagnationThresholds } from './stagnation.js'
 import { registerJevApi } from './jev-api.js'
-import { approvalBucketsOf, calibrate, renderCalibration, THRESHOLD_KEYS, type CalibrationReport, type ThresholdsInput } from './calibrate.js'
+import { approvalBucketsOf, assessReadiness, calibrate, renderCalibration, suggestAllowlist, THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness, type ThresholdsInput } from './calibrate.js'
 import {
   CalibrationHistory,
   compareWithPrevious,
@@ -148,7 +149,13 @@ export function apply(ctx: Context, config: Config): void {
     // 基线与挂点 getter 同源（活配置）：「应用」后重新生成的报告立即以新值
     // 为 current，采纳标记/落盘快照不与热生效事实脱节。
     const thresholds = thresholdsOf(resolveSettings(configOverride ?? config))
+    const liveAllowlist = resolveSettings(configOverride ?? config).preapproveToolAllowlist
     const report = calibrate(entries, thresholds)
+    // 预批准候选：从 guard 影子数据推导，只推不在名单里的新工具。
+    const suggestions = suggestAllowlist(entries).filter(s => !liveAllowlist.has(s.tool))
+    const reportWithSuggestions: CalibrationReport = suggestions.length === 0
+      ? report
+      : { ...report, allowlistSuggestions: suggestions }
     const buckets = approvalBucketsOf(entries)
     const history = new CalibrationHistory(settings.telemetryDir)
     const recentSnapshots = await history.recent(1)
@@ -159,9 +166,9 @@ export function apply(ctx: Context, config: Config): void {
     if (shouldAppend(previous, snapshot)) history.append(snapshot)
     return {
       report: comparison.previousTs === undefined
-        ? report
+        ? reportWithSuggestions
         : {
-          ...report,
+          ...reportWithSuggestions,
           history: {
             previousTs: comparison.previousTs,
             adopted: comparison.adopted.length,
@@ -275,12 +282,14 @@ export function apply(ctx: Context, config: Config): void {
         // 当日成本（进程内记账）与限额（0 = 不限）；限额读活配置（与执行同源）。
         costTodayUsd: jev.costTodayUsd(),
         dailyCostLimitUsd: resolveSettings(configOverride ?? config).dailyCostLimitUsd,
+        // 预批准名单（面板可管理，热生效）。
+        preapproveAllowlist: [...resolveSettings(configOverride ?? config).preapproveToolAllowlist].sort(),
         guardEnabled: settings.guardEnabled,
         preapproveEnabled: settings.preapproveEnabled,
         stagnationEnabled: settings.stagnationEnabled,
       }
     },
-    getStats: () => telemetry.statsData(200),
+    getStats: () => telemetry.statsData(500),
     // 校准基线用与四个挂点同一份 settings 快照：报告的「当前值」= 实际执行值。
     // 每次生成都会与上一份快照对比（采纳/忽略/桶变化）并落一份新快照。
     getCalibration: async (): Promise<CalibrationReport> => (await buildCalibration(false)).report,
@@ -288,6 +297,7 @@ export function apply(ctx: Context, config: Config): void {
     getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
     testConnection: (apiKeyOverride) => jev.ping(apiKeyOverride === undefined ? {} : { apiKeyOverride }),
     getLog: (limit) => telemetry.recentEntries(limit),
+    getReadiness: async (): Promise<ShadowReadiness> => assessReadiness(await telemetry.entries(2000)),
     updateConfig: async (patch): Promise<{ rejected: string[] }> => {
       const rejected: string[] = []
       // 先立即更新内存（getStatus 立刻能看到，无论 settings 服务是否存在）
@@ -306,6 +316,15 @@ export function apply(ctx: Context, config: Config): void {
           continue
         }
         configOverride = { ...(configOverride ?? config), [key]: value as never }
+      }
+      // 预批准名单（面板管理）：非空字符串数组校验后整组替换（热生效）。
+      if (Array.isArray(patch['preapproveToolAllowlist'])) {
+        const list = patch['preapproveToolAllowlist'] as unknown[]
+        if (list.every(item => typeof item === 'string' && item.length > 0)) {
+          configOverride = { ...(configOverride ?? config), preapproveToolAllowlist: list as string[] }
+        } else {
+          rejected.push('preapproveToolAllowlist')
+        }
       }
       if (rejected.length > 0) {
         ctx.logger.warn(`dsh-jev-interceptor: rejected out-of-range config values: ${rejected.join(', ')}`)
@@ -356,7 +375,7 @@ export function apply(ctx: Context, config: Config): void {
 
   if (settings.preapproveEnabled) {
     ctx.on('approval/request', createPreapproveListener({
-      allowlist: settings.preapproveToolAllowlist,
+      allowlist: () => new Set(resolveSettings(configOverride ?? config).preapproveToolAllowlist),
       thresholds: () => {
         const t = thresholdsOf(resolveSettings(configOverride ?? config))
         return {
@@ -482,6 +501,59 @@ export function apply(ctx: Context, config: Config): void {
       },
     })
     void commandsCtx.commands.register({
+      definitionId: jevAllowlistDefinitionId,
+      name: 'jev-allowlist',
+      description: '预批准名单管理：查看/加/删工具（add <tool> | remove <tool> | 建议来自影子数据）',
+      input: { hint: '[add <tool> | remove <tool>]' },
+      handler: async (invocation): Promise<CommandResult> => {
+        const tokens = invocation.rawInput.trim().split(/\s+/).filter(t => t.length > 0)
+        const readList = (): string[] => [...resolveSettings(configOverride ?? config).preapproveToolAllowlist].sort()
+        // 无参：显示名单 + 影子建议。
+        if (tokens.length === 0) {
+          const list = readList()
+          const suggestions = suggestAllowlist(await telemetry.entries(2000)).filter(s => !list.includes(s.tool))
+          const lines: string[] = ['```', '⚡ 预批准名单（名单内工具经 Jev 双重判断后自动放行）', '']
+          lines.push(list.length === 0 ? '  （空——预批准不会自动批任何工具）' : `  ${list.join(' · ')}`)
+          if (suggestions.length > 0) {
+            lines.push('')
+            lines.push('💡 影子数据推荐（全部调用低风险、高置信、低不可逆、无注入嫌疑）：')
+            for (const s of suggestions.slice(0, 5)) {
+              lines.push(`   ${s.tool}  样本 ${String(s.samples)} · 平均置信 ${s.avgConfidence.toFixed(2)} · 加入：/jev-allowlist add ${s.tool}`)
+            }
+          } else {
+            lines.push('')
+            lines.push('  暂无可推荐工具（候选要求某工具的全部历史调用均为低风险高置信）')
+          }
+          lines.push('```')
+          return { kind: 'success', text: lines.join('\n') }
+        }
+        const [op, tool] = tokens
+        if ((op !== 'add' && op !== 'remove') || tool === undefined || tool.length === 0) {
+          return { kind: 'error', text: '用法：/jev-allowlist [add <tool> | remove <tool>]；无参查看名单与建议' }
+        }
+        const current = readList()
+        const next = op === 'add'
+          ? [...new Set([...current, tool])].sort()
+          : current.filter(item => item !== tool)
+        if (next.length === current.length && op === 'add') {
+          return { kind: 'success', text: `${tool} 已在预批准名单中` }
+        }
+        if (next.length === current.length && op === 'remove') {
+          return { kind: 'error', text: `${tool} 不在预批准名单中（当前：${current.join(' · ') || '空'}）` }
+        }
+        // 与面板同路径：热生效（活配置）+ 尽力持久化。
+        configOverride = { ...(configOverride ?? config), preapproveToolAllowlist: next }
+        const settingsService = ctx.get('settings')
+        if (settingsService !== undefined && typeof settingsService.update === 'function') {
+          try { await settingsService.update(SETTINGS_NS, { preapproveToolAllowlist: next }) } catch { /* 内存已生效 */ }
+        }
+        return {
+          kind: 'success',
+          text: `已${op === 'add' ? '加入' : '移出'} ${tool}（下一个审批请求即生效）。当前名单：${next.join(' · ') || '空'}`,
+        }
+      },
+    })
+    void commandsCtx.commands.register({
       definitionId: jevLogDefinitionId,
       name: 'jev-log',
       description: '查看最近 n 条决策明细（默认 20；--json/--csv 导出原始数据）',
@@ -521,7 +593,7 @@ export function apply(ctx: Context, config: Config): void {
           `  Key    ${config.apiKey !== undefined && config.apiKey.length > 0 ? '✅ 已配置' : (await resolveKey()) !== undefined ? '✅ 环境变量' : '❌ 未配置（运行 /jev-key <key>）'}`,
           settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
           '  控制: /jev-on /jev-off /jev-mode',
-          '  统计: /jev-stats │ 明细: /jev-log │ 校准: /jev-calibrate │ 归因: /jev-impact',
+          '  统计: /jev-stats │ 明细: /jev-log │ 校准: /jev-calibrate │ 归因: /jev-impact │ 名单: /jev-allowlist',
           '```',
         ].filter(line => line.length > 0).join('\n')
         return { kind: 'success', text }

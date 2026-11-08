@@ -104,6 +104,11 @@ export interface CalibrationReport {
     /** 手动改到建议之外的条数（面板徽章防"建议消失"）。 */
     readonly manual: number
   }
+  /**
+   * 预批准候选工具（从 guard 影子数据推导；空 allowlist 部署下唤醒
+   * "省点击"卖点的入口）。仅当 allowlist 为空或候选有新增时非空。
+   */
+  readonly allowlistSuggestions?: readonly AllowlistSuggestion[]
 }
 
 // ── 规则常量（全部可在一处调整）──────────────────────────────────────────
@@ -352,6 +357,111 @@ export function approvalBucketsOf(entries: readonly TelemetryEntry[]): Record<Bu
     }
   }
   return buckets
+}
+
+// ── allowlist 建议（唤醒沉睡的预批准：从 guard 影子数据推导可信工具）────
+
+/** allowlist 建议的纳入门槛。 */
+const ALLOWLIST_MIN_SAMPLES = 5
+const ALLOWLIST_CONF_MIN = 0.85
+const ALLOWLIST_IRREV_MAX = 0.15
+const ALLOWLIST_INJ_MAX = 0.1
+
+/** 一个工具的 allowlist 候选依据。 */
+export interface AllowlistSuggestion {
+  readonly tool: string
+  readonly samples: number
+  readonly avgConfidence: number
+  readonly avgIrreversibility: number
+  readonly maxInjection: number
+}
+
+/**
+ * 从 guard 影子遥测推导预批准候选工具：某工具的全部已答调用都是
+ * 「低风险 + 高置信 + 低不可逆 + 无注入嫌疑」时，它是自动批的合理候选
+ * （最终生效仍经预批准自己的双 noul 证据门）。纯函数，不 IO 不调 Jev。
+ * @param entries - 遥测记录窗口。
+ * @returns 候选列表，按样本数降序。
+ */
+export function suggestAllowlist(entries: readonly TelemetryEntry[]): readonly AllowlistSuggestion[] {
+  const byTool = new Map<string, { conf: number[]; irrev: number[]; inj: number[]; allLow: boolean }>()
+  for (const entry of entries) {
+    const sample = guardSampleOf(entry)
+    if (sample === undefined) continue
+    const tool = entry.tool ?? '—'
+    if (sample.risk !== 'low') {
+      // 任何一次非 low 的判定让该工具直接出局（自动批候选要求全历史低风险）。
+      byTool.set(tool, { conf: [], irrev: [], inj: [], allLow: false })
+      continue
+    }
+    const bucket = byTool.get(tool)
+    if (bucket === undefined) {
+      byTool.set(tool, { conf: [sample.riskConfidence], irrev: [sample.irreversibility], inj: [sample.injection], allLow: true })
+      continue
+    }
+    if (bucket.allLow === false) continue
+    bucket.conf.push(sample.riskConfidence)
+    bucket.irrev.push(sample.irreversibility)
+    bucket.inj.push(sample.injection)
+  }
+  const out: AllowlistSuggestion[] = []
+  for (const [tool, bucket] of byTool) {
+    if (!bucket.allLow || bucket.conf.length < ALLOWLIST_MIN_SAMPLES) continue
+    const avg = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length
+    const avgConfidence = avg(bucket.conf)
+    const avgIrreversibility = avg(bucket.irrev)
+    const maxInjection = Math.max(...bucket.inj)
+    if (avgConfidence < ALLOWLIST_CONF_MIN || avgIrreversibility > ALLOWLIST_IRREV_MAX || maxInjection > ALLOWLIST_INJ_MAX) continue
+    out.push({ tool, samples: bucket.conf.length, avgConfidence, avgIrreversibility, maxInjection })
+  }
+  return out.sort((left, right) => right.samples - left.samples)
+}
+
+// ── 影子→执行的升级就绪度（开箱引导的一部分）────────────────────────────
+
+/** shadow 数据是否足以放心切 enforce 的评估。 */
+export interface ShadowReadiness {
+  readonly shadowSamples: number
+  readonly misApprovals: number
+  readonly degradedRate: number
+  readonly ready: boolean
+  /** 中文理由（面板/命令共用）。 */
+  readonly reason: string
+}
+
+/** 就绪度门槛。 */
+const READINESS_MIN_SAMPLES = 30
+const READINESS_MAX_DEGRADED_RATE = 0.3
+
+/**
+ * 评估影子数据是否支持切到执行模式。纯函数。
+ * @param entries - 遥测记录窗口。
+ */
+export function assessReadiness(entries: readonly TelemetryEntry[]): ShadowReadiness {
+  let shadow = 0
+  let degraded = 0
+  let misApprovals = 0
+  for (const entry of entries) {
+    if (entry.mode !== 'shadow') continue
+    shadow += 1
+    if (entry.action === 'degraded') degraded += 1
+    if (entry.tag === 'approval-loop' && entry.action === 'agreement'
+      && entry.detail?.includes('would-over-approve') === true) misApprovals += 1
+  }
+  const degradedRate = shadow > 0 ? degraded / shadow : 0
+  const reasons: string[] = []
+  if (shadow < READINESS_MIN_SAMPLES) reasons.push(`影子样本 ${String(shadow)} 条（< ${String(READINESS_MIN_SAMPLES)}）`)
+  if (misApprovals > 0) reasons.push(`影子期出现 ${String(misApprovals)} 次「Jev 会批、人拒绝」`)
+  if (degradedRate > READINESS_MAX_DEGRADED_RATE) reasons.push(`降级率 ${(degradedRate * 100).toFixed(0)}%（> 30%）`)
+  return {
+    shadowSamples: shadow,
+    misApprovals,
+    degradedRate,
+    ready: reasons.length === 0 && shadow > 0,
+    reason: reasons.length === 0
+      ? '影子数据健康：零误批倾向、降级率正常，建议切到执行模式'
+      : `继续观察：${reasons.join('；')}`,
+  }
 }
 
 // ── 主分析 ───────────────────────────────────────────────────────────────

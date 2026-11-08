@@ -6,7 +6,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { THRESHOLD_KEYS, type CalibrationReport } from './calibrate.js'
+import { THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness } from './calibrate.js'
 import type { ImpactSummary } from './impact.js'
 import type { PingResult } from './jev.js'
 import { clampLogLimit, LOG_PANEL_N, type TelemetryEntry } from './telemetry.js'
@@ -60,6 +60,8 @@ export function registerJevApi(
     testConnection: (apiKeyOverride?: string) => Promise<PingResult>
     /** 决策明细（/log 路由用；detail 只含枚举与数值 token，无敏感数据）。 */
     getLog: (limit: number) => Promise<TelemetryEntry[]>
+    /** 影子→执行的就绪度评估（面板 hero 的升级提示灯）。 */
+    getReadiness: () => Promise<ShadowReadiness>
     updateConfig: (patch: Record<string, unknown>) => Promise<{ rejected: string[] }>
   },
 ): void {
@@ -127,6 +129,13 @@ export function registerJevApi(
   })
 
   connection.fetch.register({
+    path: `${BASE}/readiness`,
+    methods: ['GET'],
+    requestBody: 'buffered',
+    fetch: async () => json(await deps.getReadiness()),
+  })
+
+  connection.fetch.register({
     path: `${BASE}/config`,
     methods: ['PUT'],
     requestBody: 'buffered',
@@ -136,7 +145,7 @@ export function registerJevApi(
         // Whitelist: toggles/credentials plus the eight calibratable thresholds
         // (calibration's one-click apply); threshold values re-validated host-side
         // and rejected honestly (400) when out of range.
-        const allowed = ['enabled', 'mode', 'apiKey', 'provider', 'endpoint', ...THRESHOLD_KEYS]
+        const allowed = ['enabled', 'mode', 'apiKey', 'provider', 'endpoint', 'preapproveToolAllowlist', ...THRESHOLD_KEYS]
         const patch: Record<string, unknown> = {}
         for (const key of allowed) {
           if (Object.hasOwn(body, key)) patch[key] = body[key]

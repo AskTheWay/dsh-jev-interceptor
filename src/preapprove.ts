@@ -35,7 +35,8 @@ import type { ApprovalTrace } from './approval-loop.js'
 export interface PreapproveDeps {
   /** Live settings read once per event: runtime toggles take effect immediately. */
   readonly live: () => LiveSettings
-  readonly allowlist: ReadonlySet<string>
+  /** 每事件读取的允许名单（函数）：面板/命令更新名单后下一个审批请求即生效。 */
+  readonly allowlist: () => ReadonlySet<string>
   /** 每事件读取的阈值（函数）：热更新后下一个调用即生效。 */
   readonly thresholds: () => PreapproveThresholds
   readonly recentMessages: number
@@ -98,7 +99,7 @@ export function createPreapproveListener(
     if (!live.enabled) return next()
     // Our guard's escalation is a request FOR the human; auto-approving it would defeat the guard.
     if (req.reason !== undefined && req.reason.startsWith('jev-guard:')) return next()
-    if (!deps.allowlist.has(req.toolName)) return next()
+    if (!deps.allowlist().has(req.toolName)) return next()
 
     let verdict: PreapproveVerdict | undefined
     try {
