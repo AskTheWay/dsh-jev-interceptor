@@ -224,8 +224,10 @@ export class Telemetry {
       // 一致率（approval-loop 专属）
       const bucketEntries = Object.entries(stats.approvalBuckets)
       if (bucketEntries.length > 0) {
+        const headline = bucketEntries.map(([b, n]) => `${b}=${String(n)}`).join(' ')
         lines.push('')
         lines.push('   🤝 一致率')
+        lines.push(`   agreement: ${headline}`)
         for (const [bucket, n] of bucketEntries) {
           const label = BUCKET_LABELS[bucket] ?? bucket
           const icon = bucket === 'would-over-approve' ? (n === 0 ? '✅' : '⚠️') : ''
@@ -626,3 +628,4 @@ export function toLogCsv(entries: readonly TelemetryEntry[]): string {
 export function toLogJson(entries: readonly TelemetryEntry[]): string {
   return JSON.stringify(entries)
 }
+
