@@ -7,6 +7,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import type { LocaleSetting } from './host-locale.js'
 
 /**
  * Complete plugin configuration, validated by the same-named schema.
@@ -21,6 +22,11 @@ export interface Config {
   enabled?: boolean
   /** `shadow` (default) records would-be decisions only; `enforce` acts on them. */
   mode?: 'shadow' | 'enforce'
+  /**
+   * 消息语言：`auto`（默认，跟随 GUI 的语言选择）、`en` 或 `zh`。
+   * 只影响本插件生成给用户的文本（审批理由、提醒、命令与报告输出）。
+   */
+  locale?: LocaleSetting
   /** Which Jev entry point to call: typesafe (官方) / openrouter / custom. */
   provider?: 'typesafe' | 'openrouter' | 'custom'
   /** 自定义 endpoint URL（provider 为 custom 时必填）. */
@@ -127,6 +133,7 @@ const DEFAULT_READ_ONLY_TOOLS = ['read', 'read_image', 'grep', 'glob', 'todo_wri
 export const DEFAULTS = {
   enabled: false,
   mode: 'shadow' as const,
+  locale: 'auto' as const,
   provider: 'typesafe' as const,
   apiKeyEnv: 'TYPESAFE_API_KEY',
   timeoutMs: 1500,
@@ -167,6 +174,8 @@ export const DEFAULTS = {
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(DEFAULTS.enabled),
   mode: z.union(['shadow', 'enforce']).default(DEFAULTS.mode),
+  locale: z.union(['auto', 'en', 'zh']).default(DEFAULTS.locale)
+    .description('Message language: auto follows the GUI language; en/zh pin it'),
   provider: z.union(['typesafe', 'openrouter', 'custom']).default(DEFAULTS.provider),
   endpoint: z.string(),
   model: z.string(),
@@ -218,6 +227,7 @@ export const Config: z<Config> = z.object({
 /** Fully-defaulted settings, the one resolved shape the rest of the plugin consumes. */
 export interface ResolvedSettings {
   readonly mode: 'shadow' | 'enforce'
+  readonly locale: LocaleSetting
   readonly timeoutMs: number
   readonly cooldownMs: number
   readonly failureThreshold: number
@@ -261,6 +271,7 @@ export interface ResolvedSettings {
 export function resolveSettings(config: Config): ResolvedSettings {
   return {
     mode: config.mode ?? DEFAULTS.mode,
+    locale: config.locale ?? DEFAULTS.locale,
     // timeoutMs 未显式配置时跟随 provider：TypeSafe 直连 ~1s 内，OpenRouter 代理 ~3s。
     timeoutMs: config.timeoutMs
       ?? (config.provider === 'openrouter' ? DEFAULTS.openrouterTimeoutMs : DEFAULTS.timeoutMs),

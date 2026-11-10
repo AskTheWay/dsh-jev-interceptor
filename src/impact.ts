@@ -19,6 +19,7 @@
  */
 
 import type { TelemetryEntry } from './telemetry.js'
+import { translate, type Locale } from './localization.js'
 
 /** 一致率分桶（与 approval-loop 的 detail token 对齐）。 */
 const BUCKET_KEYS = [
@@ -154,16 +155,19 @@ function usd(value: number): string {
 }
 
 /**
- * 渲染中文效果报告（自带 ``` 包裹，风格与 renderCalibration 一致）。
- * @param summary - summarizeImpact 的输出。
- * @returns 聊天友好的纯文本报告。
+ * Render the impact report (fenced, styled like renderCalibration).
+ * @param summary - summarizeImpact output.
+ * @param locale - report language (default Chinese for legacy callers).
+ * @returns a chat-friendly plain-text report.
  */
-export function renderImpact(summary: ImpactSummary): string {
+export function renderImpact(summary: ImpactSummary, locale: Locale = 'zh'): string {
+  const t = (key: Parameters<typeof translate>[1], values?: Record<string, string | number>): string =>
+    translate(locale, key, values)
   const lines: string[] = ['```']
-  lines.push('📈 dsh-jev-interceptor 效果归因')
+  lines.push(t('msg.impactTitle'))
   if (summary.windowSize === 0) {
     lines.push('')
-    lines.push('  暂无数据：先 /jev-on 启用插件跑一段会话，再回来归因')
+    lines.push(t('msg.impactEmpty'))
     lines.push('```')
     return lines.join('\n')
   }
@@ -171,59 +175,84 @@ export function renderImpact(summary: ImpactSummary): string {
   const span = summary.firstTs !== undefined && summary.lastTs !== undefined
     ? `${summary.firstTs.slice(0, 10)} ~ ${summary.lastTs.slice(0, 10)}`
     : '—'
-  lines.push(`窗口 ${num(summary.windowSize)} 条（${span}，${String(summary.days)} 天 · ${String(summary.sessions)} 个会话）`
-    + ` 模式 shadow ${num(summary.modeSplit.shadow)} / enforce ${num(summary.modeSplit.enforce)}`)
+  lines.push(t('msg.impactWindow', {
+    v0: num(summary.windowSize),
+    v1: span,
+    v2: summary.days,
+    v3: summary.sessions,
+    v4: num(summary.modeSplit.shadow),
+    v5: num(summary.modeSplit.enforce),
+  }))
   lines.push('')
-  lines.push('✅ 净收益（enforce 期实际生效）')
-  lines.push(`   省掉的审批点击   ${num(summary.enforce.autoApproved)} 次（自动批准 = 每次少点一次确认）`)
-  lines.push(`   拦截的高风险调用 ${num(summary.enforce.denied)} 次`)
-  lines.push(`   停滞提醒         ${num(summary.enforce.stagnationAlerts)} 次`)
-  lines.push(`   转人工           ${num(summary.enforce.asked)} 次（风险不确定，交回人工）`)
+  lines.push(t('msg.impactBenefit'))
+  lines.push(t('msg.impactAutoApproved', { v0: num(summary.enforce.autoApproved) }))
+  lines.push(t('msg.impactDenied', { v0: num(summary.enforce.denied) }))
+  lines.push(t('msg.impactStagnationAlerts', { v0: num(summary.enforce.stagnationAlerts) }))
+  lines.push(t('msg.impactAsked', { v0: num(summary.enforce.asked) }))
   // 零分母的零不是收据：预批从未触发时如实标注「无样本」。
   const enforceBuckets = summary.agreement.enforce
   const misApproval = enforceBuckets['would-over-approve']
   const anyEnforceAgreement = BUCKET_KEYS.some(key => enforceBuckets[key] > 0)
   if (anyEnforceAgreement || summary.enforce.autoApproved > 0) {
-    lines.push(`   误批             ${num(misApproval)} 次${misApproval === 0 ? '（would-over-approve = 0）' : ' ⚠️ 出现 Jev 批准、人拒绝'}`)
+    lines.push(t(misApproval === 0 ? 'msg.impactMisApprovalNone' : 'msg.impactMisApprovalSome', {
+      v0: num(misApproval),
+    }))
     const friction = enforceBuckets['friction-human-approved']
-    if (friction > 0) lines.push(`   多余人工         ${num(friction)} 次（Jev 转人工、人放行——收紧候选）`)
+    if (friction > 0) lines.push(t('msg.impactFriction', { v0: num(friction) }))
   } else {
-    lines.push('   误批             — 无样本（预批准路径未触发，该指标尚未被测量）')
+    lines.push(t('msg.impactNoMisApprovalSample'))
   }
   // shadow 期的 would-over-approve 是假设性对照（Jev 未生效），绝不混入上面的实际段。
   const shadowWoap = summary.agreement.shadow['would-over-approve']
   if (shadowWoap > 0) {
-    lines.push(`   shadow 对照       Jev 会批、人拒绝 ${num(shadowWoap)} 次（假设性，未生效——升 enforce 前先校准）`)
+    lines.push(t('msg.impactShadowWouldOverApprove', { v0: num(shadowWoap) }))
   }
   const shadowFriction = summary.agreement.shadow['friction-human-approved']
   if (shadowFriction > 0) {
-    lines.push(`   shadow 对照       Jev 转人工、人放行 ${num(shadowFriction)} 次（假设性——阈值偏紧的信号）`)
+    lines.push(t('msg.impactShadowFriction', { v0: num(shadowFriction) }))
   }
   lines.push('')
   const costText = summary.cost.costUsd > 0
     ? usd(summary.cost.costUsd)
     : summary.cost.estimatedCostUsd !== undefined
-      ? `≈${usd(summary.cost.estimatedCostUsd)}（按公开输入价估算）`
+      ? t('msg.impactEstimated', { v0: usd(summary.cost.estimatedCostUsd) })
       : '$0'
-  lines.push('💰 成本与延迟')
-  lines.push(`   Jev 决策成本     ${costText}（${num(summary.cost.inputTokens)} input tokens，${num(summary.cost.cachedDecisions)} 次缓存命中免费）`)
+  lines.push(t('msg.impactCostTitle'))
+  lines.push(t('msg.impactCostLine', {
+    v0: costText,
+    v1: num(summary.cost.inputTokens),
+    v2: num(summary.cost.cachedDecisions),
+  }))
   if (summary.latency.p50 !== undefined) {
-    lines.push(`   决策延迟         p50 ${String(summary.latency.p50)}ms · p95 ${String(summary.latency.p95 ?? summary.latency.p50)}ms`)
+    lines.push(t('msg.impactLatency', {
+      v0: summary.latency.p50,
+      v1: summary.latency.p95 ?? summary.latency.p50,
+    }))
   }
   if (summary.degraded.total > 0) {
-    lines.push(`   降级             ${num(summary.degraded.total)} 次（${Object.entries(summary.degraded.byReason).map(([reason, n]) => `${reason} ${String(n)}`).join(' · ')}）`)
+    lines.push(t('msg.impactDegraded', {
+      v0: num(summary.degraded.total),
+      v1: Object.entries(summary.degraded.byReason).map(([reason, n]) => `${reason} ${String(n)}`).join(' · '),
+    }))
   }
   lines.push('━'.repeat(44))
   if (summary.enforce.autoApproved > 0 || summary.enforce.denied > 0) {
-    lines.push(`  一句话：${num(summary.enforce.autoApproved + summary.enforce.denied)} 次该人工把关的判断被自动完成，误批 ${num(misApproval)} 次，成本 ${costText}`)
+    lines.push(t('msg.impactOneLineEffective', {
+      v0: num(summary.enforce.autoApproved + summary.enforce.denied),
+      v1: num(misApproval),
+      v2: costText,
+    }))
   } else if (summary.enforce.asked + summary.enforce.stagnationAlerts > 0) {
-    lines.push(`  一句话：enforce 期已转人工 ${num(summary.enforce.asked)} 次、停滞提醒 ${num(summary.enforce.stagnationAlerts)} 次，还没有自动批准或拦截（阈值可经 /jev-calibrate 调整）`)
+    lines.push(t('msg.impactOneLineAskOnly', {
+      v0: num(summary.enforce.asked),
+      v1: num(summary.enforce.stagnationAlerts),
+    }))
   } else if (summary.modeSplit.shadow > 0) {
-    lines.push('  一句话：enforce 期还没有生效动作；shadow 期数据在积累校准依据')
+    lines.push(t('msg.impactOneLineShadow'))
   } else {
-    lines.push('  一句话：enforce 期还没有生效动作')
+    lines.push(t('msg.impactOneLineNothing'))
   }
-  lines.push('  明细: /jev-log │ 校准: /jev-calibrate')
+  lines.push(t('msg.impactFooter'))
   lines.push('```')
   return lines.join('\n')
 }

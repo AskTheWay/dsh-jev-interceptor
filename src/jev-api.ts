@@ -1,6 +1,7 @@
 /** Host Web API for authenticated configuration and telemetry access. Register routes through the connection service; skip non-web compositions without that service. */
 
 import type { Locale } from './localization.js'
+import { translate } from './localization.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness } from './calibrate.js'
 import type { ImpactSummary } from './impact.js'
@@ -53,8 +54,10 @@ export function registerJevApi(
     testConnection: (apiKeyOverride?: string) => Promise<PingResult>
     /** Decision log; detail contains enum and numeric tokens without sensitive data. */
     getLog: (limit: number) => Promise<TelemetryEntry[]>
-    /** 影子→执行的就绪度评估（面板 hero 的升级提示灯）。 */
-    getReadiness: () => Promise<ShadowReadiness>
+    /** Shadow-to-enforce readiness (the panel hero's promote hint). */
+    getReadiness: (locale?: Locale) => Promise<ShadowReadiness>
+    /** Language of host-generated error copy, resolved per request. */
+    locale: () => Locale
     updateConfig: (patch: Record<string, unknown>) => Promise<{ rejected: string[] }>
   },
 ): void {
@@ -127,7 +130,9 @@ export function registerJevApi(
     path: `${BASE}/readiness`,
     methods: ['GET'],
     requestBody: 'buffered',
-    fetch: async () => json(await deps.getReadiness()),
+    fetch: async (request: Request) => json(await deps.getReadiness(
+      new URL(request.url).searchParams.get('locale') === 'en' ? 'en' : 'zh',
+    )),
   })
 
   connection.fetch.register({
@@ -146,11 +151,15 @@ export function registerJevApi(
           if (Object.hasOwn(body, key)) patch[key] = body[key]
         }
         if (Object.keys(patch).length === 0) {
-          return json({ error: 'no updatable fields' }, 400)
+          return json({ error: translate(deps.locale(), 'msg.noUpdatableFields') }, 400)
         }
         const { rejected } = await deps.updateConfig(patch)
         if (rejected.length > 0) {
-          return json({ error: `非法值（需 0-1）: ${rejected.join(', ')}`, code: 'invalid-threshold', fields: rejected }, 400)
+          return json({
+            error: translate(deps.locale(), 'msg.invalidThreshold', { v0: rejected.join(', ') }),
+            code: 'invalid-threshold',
+            fields: rejected,
+          }, 400)
         }
         return json({ ok: true })
       } catch (error: unknown) {

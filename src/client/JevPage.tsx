@@ -839,7 +839,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         getJson('/stats'),
         getJson('/log?limit=500'),
         getJson('/impact'),
-        getJson('/readiness'),
+        getJson(`/readiness?locale=${getLocale()}`),
       ])
       if (statusResult.status === 'fulfilled') {
         setStatus(statusResult.value as JevStatus)

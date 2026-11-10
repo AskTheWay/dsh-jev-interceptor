@@ -53,6 +53,7 @@ async function makeDeps(overrides: Partial<Omit<GuardDeps, 'live'>> & { live?: (
   const live: LiveSettings = { enabled: true, mode: 'enforce' }
   return {
     live: () => ({ ...live }),
+    locale: () => 'zh',
     readOnlyTools: new Set(['read', 'grep']),
     excludeTools: new Set(),
     thresholds: () => ({

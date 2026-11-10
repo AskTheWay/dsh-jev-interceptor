@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Telemetry, type TelemetryEntry } from '../src/telemetry.js'
+import type { Locale } from '../src/localization.js'
 
-async function withLog(entries: readonly TelemetryEntry[]): Promise<string> {
+async function withLog(entries: readonly TelemetryEntry[], locale?: Locale): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-tel-'))
   const telemetry = new Telemetry(dir)
   for (const entry of entries) telemetry.record(entry)
@@ -21,7 +22,7 @@ async function withLog(entries: readonly TelemetryEntry[]): Promise<string> {
     }
     if (Date.now() > deadline) break
   }
-  const text = await telemetry.stats()
+  const text = await telemetry.stats(undefined, locale)
   await rm(dir, { recursive: true, force: true })
   return text
 }
@@ -109,5 +110,17 @@ describe('Telemetry.recentEntries', () => {
     expect(all).toHaveLength(6)
     expect(await telemetry.recentEntries(0)).toEqual([])
     await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('Telemetry.stats localization', () => {
+  it('renders the report in the requested language', async () => {
+    const text = await withLog([
+      { ...base, action: 'delegate' as const, latencyMs: 400 },
+    ], 'en')
+    expect(text).toContain('decision stats')
+    expect(text).toContain('calls 1')
+    expect(text).toContain('delegate')
+    expect(text).not.toMatch(/\p{Script=Han}/u)
   })
 })

@@ -697,30 +697,47 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
 
 // ── 渲染 ────────────────────────────────────────────────────────────────
 
-const PARAM_LABELS: Readonly<Record<string, string>> = {
-  guardConfidenceMin: '中风险升级置信门',
-  guardDenyConfidence: '硬拦截置信门',
-  guardIrreversibleCeiling: '不可逆升级上限',
-  guardIrreversibleDenyFloor: '硬拦截不可逆底线',
-  guardInjectionAskThreshold: '注入升级阈值',
-  preapproveAutoApproveMin: '自动批置信门',
-  preapproveIrreversibleMax: '自动批不可逆上限',
-  preapproveInjectionSuspectMax: '自动批注入上限',
+const PARAM_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  guardConfidenceMin: 'msg.paramGuardConfidenceMin',
+  guardDenyConfidence: 'msg.paramGuardDenyConfidence',
+  guardIrreversibleCeiling: 'msg.paramGuardIrreversibleCeiling',
+  guardIrreversibleDenyFloor: 'msg.paramGuardIrreversibleDenyFloor',
+  guardInjectionAskThreshold: 'msg.paramGuardInjectionAskThreshold',
+  preapproveAutoApproveMin: 'msg.paramPreapproveAutoApproveMin',
+  preapproveIrreversibleMax: 'msg.paramPreapproveIrreversibleMax',
+  preapproveInjectionSuspectMax: 'msg.paramPreapproveInjectionSuspectMax',
+}
+
+/** Width punctuation after a parameter label: full-width in Chinese, ASCII elsewhere. */
+function paramSeparator(locale: Locale): string {
+  return locale === 'zh' ? '：' : ': '
 }
 
 /**
- * 渲染中文报告文本（自带 ``` 代码块包裹，风格与 Telemetry.stats 一致）。
- * @param report - calibrate 的输出。
- * @param extras - 附加段行数组（如历史对比），插在结尾声明之前。
- * @returns 聊天友好的纯文本报告。
+ * Render the calibration report (fenced, styled like Telemetry.stats).
+ * @param report - calibrate output.
+ * @param extras - extra lines (e.g. history comparison) inserted before the footer.
+ * @param locale - report language (default Chinese for legacy callers).
+ * @returns a chat-friendly plain-text report.
  */
-export function renderCalibration(report: CalibrationReport, extras: readonly string[] = []): string {
+export function renderCalibration(report: CalibrationReport, extras: readonly string[] = [], locale: Locale = 'zh'): string {
+  const t = (key: MessageKey, values?: Record<string, string | number>): string => translate(locale, key, values)
+  const paramLabel = (param: string): string => {
+    const key = PARAM_LABEL_KEYS[param]
+    return key === undefined ? param : t(key)
+  }
   const lines: string[] = ['```']
-  lines.push('🎯 dsh-jev-interceptor 阈值校准')
+  lines.push(t('msg.calibTitle'))
   lines.push('')
-  lines.push(`窗口 ${report.windowSize} 条（guard ${report.counts.guard} │ preapprove ${report.counts.preapprove} │ 一致率 ${report.counts.approvalLoop}）`
-    + ` 模式 shadow ${report.modeSplit.shadow} / enforce ${report.modeSplit.enforce}`)
-  lines.push(`基线：本进程已加载配置（阈值与挂点同源）`)
+  lines.push(t('msg.calibWindow', {
+    v0: report.windowSize,
+    v1: report.counts.guard,
+    v2: report.counts.preapprove,
+    v3: report.counts.approvalLoop,
+    v4: report.modeSplit.shadow,
+    v5: report.modeSplit.enforce,
+  }))
+  lines.push(t('msg.calibBaseline'))
   if (report.advice.length === 0 && report.insufficient.length === 0 && report.observations.length === 1 && report.windowSize === 0) {
     lines.push('')
     lines.push(`  ${report.observations[0].reason}`)
@@ -729,26 +746,26 @@ export function renderCalibration(report: CalibrationReport, extras: readonly st
   }
   if (report.advice.length > 0) {
     lines.push('')
-    lines.push(`💡 建议调整（${report.advice.length} 项）`)
+    lines.push(t('msg.calibAdviceTitle', { v0: report.advice.length }))
     for (const a of report.advice) {
-      lines.push(`   ${PARAM_LABELS[a.param] ?? a.param}（${a.param}）`)
+      lines.push(t('msg.calibParam', { v0: paramLabel(a.param), v1: a.param }))
       lines.push(`     ${fmt(a.current)} → ${fmt(a.suggested)}`)
-      lines.push(`     依据：${a.basis}`)
-      lines.push(`     说明：${a.note}`)
+      lines.push(t('msg.calibBasis', { v0: a.basis }))
+      lines.push(t('msg.calibNote', { v0: a.note }))
     }
   }
   if (report.insufficient.length > 0) {
     lines.push('')
-    lines.push(`📊 样本不足（不建议调整）`)
+    lines.push(t('msg.calibInsufficientTitle'))
     for (const n of report.insufficient) {
-      lines.push(`   ${PARAM_LABELS[n.param] ?? n.param}：${n.reason}`)
+      lines.push(`   ${paramLabel(n.param)}${paramSeparator(locale)}${n.reason}`)
     }
   }
   if (report.observations.length > 0) {
     lines.push('')
-    lines.push('🔍 观察（无建议）')
+    lines.push(t('msg.calibObservationTitle'))
     for (const n of report.observations) {
-      const label = n.param === '—' ? '' : `${PARAM_LABELS[n.param] ?? n.param}：`
+      const label = n.param === '—' ? '' : `${paramLabel(n.param)}${paramSeparator(locale)}`
       lines.push(`   ${label}${n.reason}`)
     }
   }
@@ -757,10 +774,7 @@ export function renderCalibration(report: CalibrationReport, extras: readonly st
     lines.push(...extras)
   }
   lines.push('━'.repeat(44))
-  lines.push('📌 本报告不自动应用。请人工确认后把建议值复制到')
-  lines.push('   cordis.patch.yml 的 jev-interceptor 配置行（或 Settings → Plugins')
-  lines.push('   表单 / 面板建议卡的「应用」按钮），保存后生效。下次 /jev-calibrate')
-  lines.push('   将以新阈值重新评估并标记采纳情况。')
+  lines.push(t('msg.calibFooter'))
   lines.push('```')
   return lines.join('\n')
 }

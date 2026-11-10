@@ -23,7 +23,7 @@
   <img src="imgs/image-5.png" width="32%" alt="设置：Provider 与连接测试">
 </p>
 
-> Web 面板（侧栏 ⚡ → Jev 决策）：实时 KPI 与净收益卡、可筛选的决策明细（每行带完整证据）、跟踪采纳情况的影子阈值建议、一键连接测试。以上全部是真实插件跑真实决策的截图。 点击刷新旁的 English / 中文按钮可切换面板语言。首次访问时使用浏览器语言（不支持的语言回退到英语）；选择会保存在浏览器中。
+> Web 面板（侧栏 ⚡ → Jev 决策）：实时 KPI 与净收益卡、可筛选的决策明细（每行带完整证据）、跟踪采纳情况的影子阈值建议、一键连接测试。以上全部是真实插件跑真实决策的截图。 点击刷新旁的 English / 中文按钮可切换 GUI 语言——面板与本插件生成的所有消息（审批理由、停滞提醒、命令报告）会一起切换，因为 Host 会持久化该选择，插件的服务端读到的是同一个偏好。首次访问没有已保存偏好时使用浏览器语言（不支持的语言回退到英语）。
 
 **一口气说完它做什么：** 工具调用执行前，Jev 用一次约 $0.00002 的请求完成风险、可逆性、任务匹配度、注入嫌疑四重分类——高置信高危直接拒绝，中风险升级人工，明确授权且可逆的不再浪费你点审批弹窗。而当 `@` 引用旧会话注入快照时，Jev 逐消息给它对当前任务的价值打分——**让错误堆栈活过字节预算，而不是最旧的那句寒暄**。任何存疑、超时、没 key，都降级回 dsh 原生行为。不需要配置任何"退路"，也绝无放宽权限的可能。
 
@@ -64,6 +64,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
   config:
     enabled: true
     mode: shadow            # 先观察模式：记录每个决策，不执行任何干预
+    locale: auto            # 消息语言：auto 跟随 GUI | en | zh
     provider: typesafe      # 或 'openrouter'（今天就能用，无需候补）| 'custom'
 ```
 
@@ -114,7 +115,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`），带 `callId` 关联与供校准重放的全精度 `scores` 数值；日志超 20MB 自动轮转。`/jev-stats` 按挂点汇总、`/jev-log` 看单条明细、Web 面板全部图表化。
 - **校准而非拍脑袋。** `/jev-calibrate` 把影子遥测喂给*同一个*决策矩阵做反事实重放，输出阈值调整建议（±0.05 步长、常规建议 ≥30 样本——出现误批危险信号时 ≥10 条即建议收紧，仅收紧方向；注入阈值永不放松、绝不自动应用）。
 
-以上全部由 **169 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
+以上全部由 **191 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
 
 ## 配置
 
@@ -158,7 +159,7 @@ OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用�
 ```sh
 npm install --legacy-peer-deps   # devDeps 钉在当前一代 dsh API
 npm run typecheck                # src + tests，对真实 @deepseek-ai 类型
-npm test                         # vitest，169 个测试，无需网络
+npm test                         # vitest，191 个测试，无需网络
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # 对真实 provider 跑一次决策
 ```

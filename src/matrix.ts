@@ -15,6 +15,7 @@
  */
 
 import type { ChoiceAnswer, NoulAnswer } from './types.js'
+import { translate, type Locale, type MessageKey } from './localization.js'
 
 /** The Jev answers the guard questions produce. */
 export interface GuardAnswers {
@@ -72,38 +73,43 @@ export function guardEvidence(answers: GuardAnswers): string {
 
 /**
  * Resolve one answer set into a guard action.
+ *
+ * The reason string is shown to the user on the approval card (ask) and in the
+ * tool error line (deny), so it is rendered in the selected language. The
+ * leading `jev-guard:` marker is a protocol constant (preapprove detects it to
+ * avoid auto-approving this plugin's own escalations) and never translated.
  * @param answers - validated Jev answers for the four guard questions.
  * @param thresholds - configured decision thresholds.
+ * @param locale - language of the user-facing reason (default Chinese for legacy callers).
  * @returns the action the pre-execute listener takes.
  */
-export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds): GuardAction {
+export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds, locale: Locale = 'zh'): GuardAction {
   const { risk, irreversible, injectionSuspect } = answers
-  // 证据摘要统一附在中文结论后；reason 行首的 `jev-guard:` 前缀是安全协议
-  // （preapprove 靠它识别并跳过本插件的升级，绝不自动批 guard 的 ask），不可移除。
+  const t = (key: MessageKey, values: Record<string, string | number>): string => translate(locale, key, values)
   const evidence = guardEvidence(answers)
   if (injectionSuspect.noul >= thresholds.injectionAskThreshold) {
     return {
       kind: 'ask',
-      reason: `jev-guard: 工具输入疑似提示注入，升级人工确认（${evidence}）`,
+      reason: t('msg.guardInjectionAsk', { v0: evidence }),
     }
   }
   if (risk.choice === 'high') {
     if (risk.confidence >= thresholds.denyConfidence && irreversible.noul >= thresholds.irreversibleDenyFloor) {
       return {
         kind: 'deny',
-        reason: `jev-guard: 高风险且不可逆，已拦截（${evidence}）`,
+        reason: t('msg.guardHighIrreversibleDeny', { v0: evidence }),
       }
     }
     return {
       kind: 'ask',
-      reason: `jev-guard: 高风险调用，需人工确认（${evidence}）`,
+      reason: t('msg.guardHighAsk', { v0: evidence }),
     }
   }
   if (risk.choice === 'medium') {
     if (risk.confidence < thresholds.confidenceMin) return { kind: 'delegate' }
     return {
       kind: 'ask',
-      reason: `jev-guard: 中风险调用，需人工确认（${evidence}）`,
+      reason: t('msg.guardMediumAsk', { v0: evidence }),
     }
   }
   // risk.choice === 'low': low confidence never acts either — it delegates to
@@ -112,7 +118,7 @@ export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds):
   if (irreversible.noul >= thresholds.irreversibleCeiling) {
     return {
       kind: 'ask',
-      reason: `jev-guard: 风险低但可能不可逆，需人工确认（${evidence}）`,
+      reason: t('msg.guardLowIrreversibleAsk', { v0: evidence }),
     }
   }
   return { kind: 'delegate' }
@@ -142,25 +148,28 @@ export type PreapproveVerdict =
  * Resolve one answer set into a pre-approval verdict.
  * @param answers - validated Jev answers for the two pre-approval questions.
  * @param thresholds - configured decision thresholds.
+ * @param locale - language of the human-facing reason.
  * @returns `auto-approve` only when both questions are confident and the call is reversible.
  */
 export function decidePreapprove(
   answers: PreapproveAnswers,
   thresholds: PreapproveThresholds,
+  locale: Locale = 'zh',
 ): PreapproveVerdict {
   const { withinGrantedScope, reversible, injectionSuspect } = answers
-  // human reason 面向审批审计（落遥测 detail 后缀）；中文 + ASCII 数值 token，与 guard reason 同风格。
+  // The human reason is surfaced in the panel's decision log (telemetry detail suffix).
+  const t = (key: MessageKey, values: Record<string, string | number>): string => translate(locale, key, values)
   if (injectionSuspect.noul >= thresholds.injectionSuspectMax) {
-    return { kind: 'human', reason: `注入疑似 ${p(injectionSuspect.noul)} 达到阈值 ${thresholds.injectionSuspectMax}` }
+    return { kind: 'human', reason: t('msg.preapproveInjection', { v0: p(injectionSuspect.noul), v1: thresholds.injectionSuspectMax }) }
   }
   if (withinGrantedScope.noul < thresholds.autoApproveMin) {
-    return { kind: 'human', reason: `范围置信度 ${p(withinGrantedScope.noul)} 低于 ${thresholds.autoApproveMin}` }
+    return { kind: 'human', reason: t('msg.preapproveScope', { v0: p(withinGrantedScope.noul), v1: thresholds.autoApproveMin }) }
   }
   if (reversible.noul < thresholds.autoApproveMin) {
-    return { kind: 'human', reason: `可逆置信度 ${p(reversible.noul)} 低于 ${thresholds.autoApproveMin}` }
+    return { kind: 'human', reason: t('msg.preapproveReversible', { v0: p(reversible.noul), v1: thresholds.autoApproveMin }) }
   }
   if (1 - reversible.noul >= thresholds.irreversibleMax) {
-    return { kind: 'human', reason: `不可逆度 ${p(1 - reversible.noul)} 达到阈值 ${thresholds.irreversibleMax}` }
+    return { kind: 'human', reason: t('msg.preapproveIrreversible', { v0: p(1 - reversible.noul), v1: thresholds.irreversibleMax }) }
   }
   return { kind: 'auto-approve' }
 }

@@ -24,6 +24,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import type { PreToolDecision, ToolErrorInfo, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { decideGuard, type GuardAction, type GuardThresholds } from './matrix.js'
+import type { Locale } from './localization.js'
 import type { LiveSettings } from './config.js'
 import type { JevClient } from './jev.js'
 import { choice, noul, type ChoiceAnswer, type JevAnswers, type JevQuestion, type NoulAnswer } from './types.js'
@@ -89,6 +90,8 @@ export class PendingAsks {
 export interface GuardDeps {
   /** Live settings read once per event: runtime toggles take effect immediately. */
   readonly live: () => LiveSettings
+  /** Language of every user-facing reason, resolved per event (the GUI language can change live). */
+  readonly locale: () => Locale
   readonly readOnlyTools: ReadonlySet<string>
   readonly excludeTools: ReadonlySet<string>
   /**
@@ -265,7 +268,7 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
     })
     return undefined
   }
-  const action = decideGuard(extracted, deps.thresholds())
+  const action = decideGuard(extracted, deps.thresholds(), deps.locale())
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'guard',

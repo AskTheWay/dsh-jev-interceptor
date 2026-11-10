@@ -1,6 +1,6 @@
 /** Browser panel registration: main content and a sidebar icon, backed by the host /api/jev-interceptor routes. */
 
-import { t } from './i18n.js'
+import { t, bindLocale } from './i18n.js'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -16,6 +16,9 @@ export const PANEL_ID = 'jev-interceptor' as MainPanelId
 export const inject = ['slots', 'locale']
 
 export function apply(ctx: ClientContext): void {
+  // One language for the whole GUI: the panel reads and switches the platform
+  // locale, whose Host-persisted preference the plugin's server half follows.
+  ctx.effect(() => bindLocale(ctx.locale), 'jev-interceptor: locale binding')
   // Inject CSS once using the official data-plugin-css convention.
   // CSS classes and theme tokens support hover, focus, and responsive styles.
   injectPanelCss()

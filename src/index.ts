@@ -20,6 +20,7 @@
  */
 
 import type { Locale } from './localization.js'
+import { translate, type MessageKey } from './localization.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -67,6 +68,7 @@ import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
 import { createStagnationListener, StagnationTracker, type StagnationThresholds } from './stagnation.js'
 import { registerJevApi } from './jev-api.js'
+import { createLocaleResolver, hostLocalePreference } from './host-locale.js'
 import { approvalBucketsOf, assessReadiness, calibrate, renderCalibration, suggestAllowlist, THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness, type ThresholdsInput } from './calibrate.js'
 import {
   CalibrationHistory,
@@ -145,7 +147,7 @@ export function apply(ctx: Context, config: Config): void {
    * and append a history snapshot with a five-minute debounce.
    * Shared by CLI commands and the panel using the same telemetry and settings.
    */
-  const buildCalibration = async (full: boolean, locale: Locale = 'zh'): Promise<{ report: CalibrationReport; extras: string[] }> => {
+  const buildCalibration = async (full: boolean, locale: Locale = localeOf()): Promise<{ report: CalibrationReport; extras: string[] }> => {
     const entries = await telemetry.entries(full ? undefined : 2000)
     // 基线与挂点 getter 同源（活配置）：「应用」后重新生成的报告立即以新值
     // 为 current，采纳标记/落盘快照不与热生效事实脱节。
@@ -177,7 +179,7 @@ export function apply(ctx: Context, config: Config): void {
             manual: comparison.manual.length,
           },
         },
-      extras: renderComparisonLines(comparison),
+      extras: renderComparisonLines(comparison, locale),
     }
   }
 
@@ -188,6 +190,17 @@ export function apply(ctx: Context, config: Config): void {
   let liveOverride: LiveSettings | undefined
   let configOverride: Config | undefined
   const live = (): LiveSettings => liveOverride ?? liveOf(configOverride ?? config)
+
+  /**
+   * Language of every user-facing text this plugin generates. `locale: auto`
+   * follows the GUI's persisted preference (Host setting `locale.preference`);
+   * an explicit config value pins it. Resolved per message so a live language
+   * switch applies to the next approval card / notice / command output.
+   */
+  const localeOf = createLocaleResolver({
+    configured: () => resolveSettings(configOverride ?? config).locale,
+    hostPreference: hostLocalePreference(ctx),
+  })
 
   /**
    * 探测 settings 服务的落盘路径（documentPath）：null 表示非 file provider
@@ -293,12 +306,13 @@ export function apply(ctx: Context, config: Config): void {
     getStats: () => telemetry.statsData(500),
     // 校准基线用与四个挂点同一份 settings 快照：报告的「当前值」= 实际执行值。
     // 每次生成都会与上一份快照对比（采纳/忽略/桶变化）并落一份新快照。
-    getCalibration: async (locale): Promise<CalibrationReport> => (await buildCalibration(false, locale)).report,
+    getCalibration: async (locale): Promise<CalibrationReport> => (await buildCalibration(false, locale ?? localeOf())).report,
     // 面板每 20s 自动刷新会打这个端点：尾部窗口而非全量（/jev-impact 命令才是全量）。
     getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
     testConnection: (apiKeyOverride) => jev.ping(apiKeyOverride === undefined ? {} : { apiKeyOverride }),
     getLog: (limit) => telemetry.recentEntries(limit),
-    getReadiness: async (): Promise<ShadowReadiness> => assessReadiness(await telemetry.entries(2000)),
+    getReadiness: async (locale): Promise<ShadowReadiness> => assessReadiness(await telemetry.entries(2000), locale ?? localeOf()),
+    locale: localeOf,
     updateConfig: async (patch): Promise<{ rejected: string[] }> => {
       const rejected: string[] = []
       // 先立即更新内存（getStatus 立刻能看到，无论 settings 服务是否存在）
@@ -349,6 +363,7 @@ export function apply(ctx: Context, config: Config): void {
     ctx.on('tools/pre-execute', createGuardListener({
       readOnlyTools: settings.readOnlyTools,
       excludeTools: settings.excludeTools,
+      locale: localeOf,
       // 每事件从活配置读取：面板/命令应用新阈值后下一个调用即生效
       // （resolveSettings 只在 Jev 分类成功后调用一次，分配成本可忽略）。
       thresholds: () => {
@@ -377,6 +392,7 @@ export function apply(ctx: Context, config: Config): void {
   if (settings.preapproveEnabled) {
     ctx.on('approval/request', createPreapproveListener({
       allowlist: () => new Set(resolveSettings(configOverride ?? config).preapproveToolAllowlist),
+      locale: localeOf,
       thresholds: () => {
         const t = thresholdsOf(resolveSettings(configOverride ?? config))
         return {
@@ -421,6 +437,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     const stagnation = createStagnationListener({
       live,
+      locale: localeOf,
       tracker: new StagnationTracker(settings.stagnationWindow),
       thresholds: stagnationThresholds,
       confidenceMin: settings.stagnationConfidenceMin,
@@ -441,19 +458,31 @@ export function apply(ctx: Context, config: Config): void {
     // Apply immediately in-process so behavior flips on the next event even
     // when persistence (or the reload it triggers) is unavailable.
     liveOverride = { ...live(), ...patch }
+    const locale = localeOf()
+    const stateWord = (enabled: boolean): string =>
+      translate(locale, enabled ? 'msg.stateEnabled' : 'msg.stateDisabled')
     const settingsService = ctx.get('settings')
     if (settingsService !== undefined && typeof settingsService.update === 'function') {
       try {
         await settingsService.update(SETTINGS_NS, patch)
         const now = live()
         const persistPath = settingsPersistPath()
-        const persistenceNote = persistPath !== null
-          ? `已持久化到 ${persistPath}`
-          : '⚠ 当前组合的设置服务不落盘——重启后丢失；要永久生效请写入 cordis.patch.yml 的 jev-interceptor 行'
+        if (persistPath !== null) {
+          return {
+            kind: 'success',
+            text: translate(locale, 'msg.setLivePersisted', {
+              v0: stateWord(now.enabled),
+              v1: now.mode,
+              v2: persistPath,
+            }),
+          }
+        }
         return {
           kind: 'success',
-          text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode}。`
-            + ` ${persistenceNote} 下一个工具调用即生效（无需重启）。`,
+          text: translate(locale, 'msg.setLiveUnpersisted', {
+            v0: stateWord(now.enabled),
+            v1: now.mode,
+          }),
         }
       } catch (error: unknown) {
         ctx.logger.warn(`dsh-jev-interceptor: settings update failed (${error instanceof Error ? error.message : String(error)}); applied in-memory only for this run`)
@@ -462,108 +491,122 @@ export function apply(ctx: Context, config: Config): void {
     const now = live()
     return {
       kind: 'success',
-      text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode} —— 仅本次运行生效。`
-        + ' 当前 profile 无法持久化插件设置；要永久生效请在 cordis.patch.yml 的 jev-interceptor 行设置 enabled/mode。',
+      text: translate(locale, 'msg.setLiveMemoryOnly', {
+        v0: stateWord(now.enabled),
+        v1: now.mode,
+      }),
     }
   }
 
   ctx.inject(['commands'], (commandsCtx) => {
+    const desc = (key: MessageKey): string => translate(localeOf(), key)
     void commandsCtx.commands.register({
       definitionId: jevStatsDefinitionId,
       name: 'jev-stats',
-      description: '查看 Jev 决策统计（默认最近 200 条，--all 全量）',
+      description: desc('msg.cmdStatsDesc'),
       // Without an `input` hint a capable client refuses any non-bare line
       // (`matchEnter` → `!bare` → not a command) and submits `/jev-stats --all`
       // as an ordinary prompt, so the handler never receives the flag.
       input: { hint: '[--all]' },
       handler: async (invocation): Promise<CommandResult> => {
         const full = invocation.rawInput.includes('--all')
-        return { kind: 'success', text: await telemetry.stats(full ? undefined : 200) }
+        return { kind: 'success', text: await telemetry.stats(full ? undefined : 200, localeOf()) }
       },
     })
     void commandsCtx.commands.register({
       definitionId: jevCalibrateDefinitionId,
       name: 'jev-calibrate',
-      description: '分析影子遥测，输出阈值调整建议（默认最近 2000 条，--all 全量）',
+      description: desc('msg.cmdCalibrateDesc'),
       input: { hint: '[--all]' },
       handler: async (invocation): Promise<CommandResult> => {
         const full = invocation.rawInput.includes('--all')
-        const { report, extras } = await buildCalibration(full)
-        return { kind: 'success', text: renderCalibration(report, extras) }
+        const locale = localeOf()
+        const { report, extras } = await buildCalibration(full, locale)
+        return { kind: 'success', text: renderCalibration(report, extras, locale) }
       },
     })
     void commandsCtx.commands.register({
       definitionId: jevImpactDefinitionId,
       name: 'jev-impact',
-      description: '效果归因：省掉的审批点击、拦截、误批、成本与延迟（全量当前日志）',
+      description: desc('msg.cmdImpactDesc'),
       handler: async (): Promise<CommandResult> => {
         const entries = await telemetry.entries(undefined)
-        return { kind: 'success', text: renderImpact(summarizeImpact(entries)) }
+        return { kind: 'success', text: renderImpact(summarizeImpact(entries), localeOf()) }
       },
     })
     void commandsCtx.commands.register({
       definitionId: jevAllowlistDefinitionId,
       name: 'jev-allowlist',
-      description: '预批准名单管理：查看/加/删工具（add <tool> | remove <tool> | 建议来自影子数据）',
+      description: desc('msg.cmdAllowlistDesc'),
       input: { hint: '[add <tool> | remove <tool>]' },
       handler: async (invocation): Promise<CommandResult> => {
-        const tokens = invocation.rawInput.trim().split(/\s+/).filter(t => t.length > 0)
+        const locale = localeOf()
+        const t = (key: MessageKey, values?: Record<string, string | number>): string => translate(locale, key, values)
+        const tokens = invocation.rawInput.trim().split(/\s+/).filter(token => token.length > 0)
         const readList = (): string[] => [...resolveSettings(configOverride ?? config).preapproveToolAllowlist].sort()
-        // 无参：显示名单 + 影子建议。
+        const listText = (items: string[]): string => items.length === 0 ? t('msg.allowlistEmptyValue') : items.join(' · ')
+        // No arguments: show the list plus the shadow-data suggestions.
         if (tokens.length === 0) {
           const list = readList()
           const suggestions = suggestAllowlist(await telemetry.entries(2000)).filter(s => !list.includes(s.tool))
-          const lines: string[] = ['```', '⚡ 预批准名单（名单内工具经 Jev 双重判断后自动放行）', '']
-          lines.push(list.length === 0 ? '  （空——预批准不会自动批任何工具）' : `  ${list.join(' · ')}`)
+          const lines: string[] = ['```', t('msg.allowlistTitle'), '']
+          lines.push(list.length === 0 ? t('msg.allowlistEmpty') : `  ${list.join(' · ')}`)
           if (suggestions.length > 0) {
             lines.push('')
-            lines.push('💡 影子数据推荐（全部调用低风险、高置信、低不可逆、无注入嫌疑）：')
+            lines.push(t('msg.allowlistSuggestionsHeader'))
             for (const s of suggestions.slice(0, 5)) {
-              lines.push(`   ${s.tool}  样本 ${String(s.samples)} · 平均置信 ${s.avgConfidence.toFixed(2)} · 加入：/jev-allowlist add ${s.tool}`)
+              lines.push(t('msg.allowlistSuggestion', {
+                v0: s.tool,
+                v1: String(s.samples),
+                v2: s.avgConfidence.toFixed(2),
+                v3: s.tool,
+              }))
             }
           } else {
             lines.push('')
-            lines.push('  暂无可推荐工具（候选要求某工具的全部历史调用均为低风险高置信）')
+            lines.push(t('msg.allowlistNoSuggestions'))
           }
           lines.push('```')
           return { kind: 'success', text: lines.join('\n') }
         }
         const [op, tool] = tokens
         if ((op !== 'add' && op !== 'remove') || tool === undefined || tool.length === 0) {
-          return { kind: 'error', text: '用法：/jev-allowlist [add <tool> | remove <tool>]；无参查看名单与建议' }
+          return { kind: 'error', text: t('msg.allowlistUsage') }
         }
         const current = readList()
         const next = op === 'add'
           ? [...new Set([...current, tool])].sort()
           : current.filter(item => item !== tool)
         if (next.length === current.length && op === 'add') {
-          return { kind: 'success', text: `${tool} 已在预批准名单中` }
+          return { kind: 'success', text: t('msg.allowlistAlready', { v0: tool }) }
         }
         if (next.length === current.length && op === 'remove') {
-          return { kind: 'error', text: `${tool} 不在预批准名单中（当前：${current.join(' · ') || '空'}）` }
+          return { kind: 'error', text: t('msg.allowlistMissing', { v0: tool, v1: listText(current) }) }
         }
-        // 与面板同路径：热生效（活配置）+ 尽力持久化。
+        // Same path as the panel: hot-effective (live config) plus best-effort persistence.
         configOverride = { ...(configOverride ?? config), preapproveToolAllowlist: next }
         const settingsService = ctx.get('settings')
         if (settingsService !== undefined && typeof settingsService.update === 'function') {
-          try { await settingsService.update(SETTINGS_NS, { preapproveToolAllowlist: next }) } catch { /* 内存已生效 */ }
+          try { await settingsService.update(SETTINGS_NS, { preapproveToolAllowlist: next }) } catch { /* in-memory already effective */ }
         }
         return {
           kind: 'success',
-          text: `已${op === 'add' ? '加入' : '移出'} ${tool}（下一个审批请求即生效）。当前名单：${next.join(' · ') || '空'}`,
+          text: op === 'add'
+            ? t('msg.allowlistAdded', { v0: tool, v1: listText(next) })
+            : t('msg.allowlistRemoved', { v0: tool, v1: listText(next) }),
         }
       },
     })
     void commandsCtx.commands.register({
       definitionId: jevLogDefinitionId,
       name: 'jev-log',
-      description: '查看最近 n 条决策明细（默认 20；--json/--csv 导出原始数据）',
+      description: desc('msg.cmdLogDesc'),
       input: { hint: '[n] [--json|--csv]' },
       handler: async (invocation): Promise<CommandResult> => {
         const args = parseLogArgs(invocation.rawInput)
         const entries = await telemetry.recentEntries(args.n)
         if (entries.length === 0) {
-          return { kind: 'success', text: '```\n⚡ dsh-jev-interceptor\n\n  暂无决策记录\n\n  运行 /jev-on 启用插件后再查看\n```' }
+          return { kind: 'success', text: translate(localeOf(), 'msg.statsEmpty') }
         }
         if (args.format === 'json') {
           return { kind: 'success', text: '```json\n' + toLogJson(entries) + '\n```' }
@@ -571,30 +614,53 @@ export function apply(ctx: Context, config: Config): void {
         if (args.format === 'csv') {
           return { kind: 'success', text: '```\n' + toLogCsv(entries) + '\n```' }
         }
-        return { kind: 'success', text: renderLogTable(entries, join(settings.telemetryDir, 'telemetry.jsonl')) }
+        return {
+          kind: 'success',
+          text: renderLogTable(entries, join(settings.telemetryDir, 'telemetry.jsonl'), localeOf()),
+        }
       },
     })
     void commandsCtx.commands.register({
       definitionId: jevStatusDefinitionId,
       name: 'jev-status',
-      description: '查看 Jev 插件当前状态',
+      description: desc('msg.cmdStatusDesc'),
       handler: async (): Promise<CommandResult> => {
+        const locale = localeOf()
+        const t = (key: MessageKey, values?: Record<string, string | number>): string => translate(locale, key, values)
         const s = live()
+        const dailyCostLimitUsd = resolveSettings(configOverride ?? config).dailyCostLimitUsd
+        const costTodayUsd = jev.costTodayUsd()
+        const keyState = config.apiKey !== undefined && config.apiKey.length > 0
+          ? t('msg.statusKeyConfigured')
+          : (await resolveKey()) !== undefined
+            ? t('msg.statusKeyEnv')
+            : t('msg.statusKeyMissing')
         const text = [
           '```',
-          '⚡ dsh-jev-interceptor 状态',
-          `  运行   ${s.enabled ? '✅ 已启用' : '⏸️ 已停用'}`,
-          `  模式   ${s.mode}${s.mode === 'shadow' ? '（只记录）' : '（执行决策）'}`,
-          `  源     ${config.provider ?? 'typesafe'}`,
-          `  模型   ${model}`,
-          `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}  停滞 ${settings.stagnationEnabled ? '✅' : '❌'}`,
-          resolveSettings(configOverride ?? config).dailyCostLimitUsd > 0
-            ? `  成本   今日 $${jev.costTodayUsd().toFixed(6)} / 限额 $${resolveSettings(configOverride ?? config).dailyCostLimitUsd.toFixed(2)}${jev.costTodayUsd() >= resolveSettings(configOverride ?? config).dailyCostLimitUsd ? '（已超限，降级中）' : ''}`
+          t('msg.statusTitle'),
+          t('msg.statusRunning', { v0: s.enabled ? t('msg.statusEnabled') : t('msg.statusDisabled') }),
+          t('msg.statusMode', {
+            v0: s.mode,
+            v1: s.mode === 'shadow' ? t('msg.statusModeShadowNote') : t('msg.statusModeEnforceNote'),
+          }),
+          t('msg.statusSource', { v0: config.provider ?? 'typesafe' }),
+          t('msg.statusModel', { v0: model }),
+          t('msg.statusHooks', {
+            v0: settings.guardEnabled ? '✅' : '❌',
+            v1: settings.preapproveEnabled ? '✅' : '❌',
+            v2: settings.stagnationEnabled ? '✅' : '❌',
+          }),
+          dailyCostLimitUsd > 0
+            ? t('msg.statusCost', {
+              v0: costTodayUsd.toFixed(6),
+              v1: dailyCostLimitUsd.toFixed(2),
+              v2: costTodayUsd >= dailyCostLimitUsd ? t('msg.statusCostOver') : '',
+            })
             : '',
-          `  Key    ${config.apiKey !== undefined && config.apiKey.length > 0 ? '✅ 已配置' : (await resolveKey()) !== undefined ? '✅ 环境变量' : '❌ 未配置（运行 /jev-key <key>）'}`,
-          settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
-          '  控制: /jev-on /jev-off /jev-mode',
-          '  统计: /jev-stats │ 明细: /jev-log │ 校准: /jev-calibrate │ 归因: /jev-impact │ 名单: /jev-allowlist',
+          t('msg.statusKey', { v0: keyState }),
+          resolveSettings(configOverride ?? config).preapproveToolAllowlist.size === 0 ? t('msg.statusAllowlistEmpty') : '',
+          t('msg.statusControls'),
+          t('msg.statusMore'),
           '```',
         ].filter(line => line.length > 0).join('\n')
         return { kind: 'success', text }
@@ -603,12 +669,13 @@ export function apply(ctx: Context, config: Config): void {
     void commandsCtx.commands.register({
       definitionId: jevKeyDefinitionId,
       name: 'jev-key',
-      description: '设置 Jev API key（持久化，不需要环境变量）',
+      description: desc('msg.cmdKeyDesc'),
       input: { hint: '<api-key>' },
       handler: async (invocation): Promise<CommandResult> => {
+        const locale = localeOf()
         const key = invocation.rawInput.trim()
         if (key.length < 10) {
-          return { kind: 'error', text: '用法：/jev-key <你的API密钥>（长度需大于 10 个字符）' }
+          return { kind: 'error', text: translate(locale, 'msg.keyUsage') }
         }
         const settingsService = ctx.get('settings')
         if (settingsService !== undefined && typeof settingsService.update === 'function') {
@@ -618,9 +685,8 @@ export function apply(ctx: Context, config: Config): void {
             return {
               kind: 'success',
               text: persistPath !== null
-                ? `dsh-jev-interceptor：API key 已存储 ✅ 持久化到 ${persistPath}，无需环境变量，重启后仍生效。下一步：/jev-on 启用插件`
-                : 'dsh-jev-interceptor：API key 已存储 ✅（本运行生效）。⚠ 当前组合的设置服务不落盘，重启后丢失——'
-                  + '请把 apiKey 写进 cordis.patch.yml 的 jev-interceptor 行永久生效',
+                ? translate(locale, 'msg.keyStoredPersisted', { v0: persistPath })
+                : translate(locale, 'msg.keyStoredMemory'),
             }
           } catch (error: unknown) {
             ctx.logger.warn(`dsh-jev-interceptor: key storage failed (${error instanceof Error ? error.message : String(error)})`)
@@ -628,33 +694,33 @@ export function apply(ctx: Context, config: Config): void {
         }
         return {
           kind: 'error',
-          text: '当前 profile 无法持久化设置。备选方案：在 cordis.patch.yml 的 jev-interceptor 行加 apiKey: <你的key>',
+          text: translate(locale, 'msg.keyNoSettings'),
         }
       },
     })
     void commandsCtx.commands.register({
       definitionId: jevOnDefinitionId,
       name: 'jev-on',
-      description: '启用 Jev 插件（持久化，无需重启）',
+      description: desc('msg.cmdOnDesc'),
       handler: async (): Promise<CommandResult> => setLive({ enabled: true }),
     })
     void commandsCtx.commands.register({
       definitionId: jevOffDefinitionId,
       name: 'jev-off',
-      description: '停用 Jev 插件（持久化，无需重启）',
+      description: desc('msg.cmdOffDesc'),
       handler: async (): Promise<CommandResult> => setLive({ enabled: false }),
     })
     void commandsCtx.commands.register({
       definitionId: jevModeDefinitionId,
       name: 'jev-mode',
-      description: '设置模式：shadow（只记录）或 enforce（执行）',
+      description: desc('msg.cmdModeDesc'),
       // Same reason as jev-stats: only a declared input hint makes the client
       // admit `/jev-mode enforce` as a command instead of a chat message.
       input: { hint: 'shadow | enforce' },
       handler: async (invocation): Promise<CommandResult> => {
         const arg = invocation.rawInput.trim()
         if (arg !== 'shadow' && arg !== 'enforce') {
-          return { kind: 'error', text: '用法：/jev-mode <shadow|enforce>\n  shadow  = 只记录决策，不执行\n  enforce = 执行决策（deny/ask/自动批）' }
+          return { kind: 'error', text: translate(localeOf(), 'msg.modeUsage') }
         }
         return setLive({ mode: arg })
       },
@@ -663,10 +729,10 @@ export function apply(ctx: Context, config: Config): void {
 
   const state = live()
   const allowlistNote = settings.preapproveToolAllowlist.size === 0
-    ? '；预批白名单为空——在 preapproveToolAllowlist 里点名工具前不会自动批任何调用'
+    ? '; the pre-approval allowlist is empty — no call is auto-approved until a tool is named in preapproveToolAllowlist'
     : ''
   ctx.logger.info(
-    `dsh-jev-interceptor：${state.enabled ? `运行中（${state.mode} 模式）` : '已注册但停用'}`
-    + `（provider ${endpoint}，模型 ${model}）；/jev-on 和 /jev-mode 可运行时切换${allowlistNote}`,
+    `dsh-jev-interceptor: ${state.enabled ? `running (${state.mode} mode)` : 'registered but disabled'}`
+    + ` (provider ${endpoint}, model ${model}); /jev-on and /jev-mode switch it at runtime${allowlistNote}`,
   )
 }

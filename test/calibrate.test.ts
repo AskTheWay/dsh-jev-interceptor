@@ -290,6 +290,15 @@ describe('renderCalibration', () => {
     const text = renderCalibration(calibrate([], current))
     expect(text).toContain('暂无数据')
   })
+
+  it('renders the whole report in English when asked', () => {
+    const entries = Array.from({ length: 35 }, () => guardEntry('medium', 0.8, 0.1))
+    const text = renderCalibration(calibrate(entries, current, 'en'), [], 'en')
+    expect(text).toContain('threshold calibration')
+    expect(text).toContain('Suggested adjustments')
+    expect(text).toContain('not applied automatically')
+    expect(text).not.toMatch(/\p{Script=Han}/u)
+  })
 })
 
 describe('suggestAllowlist', () => {
