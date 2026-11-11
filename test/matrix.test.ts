@@ -42,6 +42,13 @@ describe('decideGuard', () => {
     expect(decision.kind === 'ask' && decision.reason.includes('risk=medium 0.80')).toBe(true)
   })
 
+  it('renders the ask reason in English when the GUI language is English', () => {
+    const medium = answers({ risk: { type: 'choice', choice: 'medium', probabilities: { low: 0.1, medium: 0.8, high: 0.1 }, confidence: 0.8 } })
+    const decision = decideGuard(medium, thresholds, 'en')
+    expect(decision.kind === 'ask' && decision.reason)
+      .toBe('jev-guard: medium-risk call needs human confirmation (risk=medium 0.80 · irrev=0.05 · inj=0.02)')
+  })
+
   it('delegates on low-confidence medium risk (no basis to escalate)', () => {
     const medium = answers({ risk: { type: 'choice', choice: 'medium', probabilities: { low: 0.35, medium: 0.4, high: 0.25 }, confidence: 0.31 } })
     expect(decideGuard(medium, thresholds).kind).toBe('delegate')

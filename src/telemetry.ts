@@ -9,6 +9,7 @@
 
 import { appendFile, mkdir, open, readFile, stat, rename } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { translate, type Locale, type MessageKey } from './localization.js'
 
 /** Where a decision came from. */
 export type DecisionTag = 'guard' | 'preapprove' | 'session-reference' | 'approval-loop' | 'stagnation'
@@ -182,9 +183,10 @@ export class Telemetry {
    * chat-friendly report with bar charts and status indicators.
    * @param tailLines - when provided, aggregate only the trailing N lines
    *   instead of the whole log (avoids reading 20 MB on every command).
+   * @param locale - report language (default Chinese for legacy callers).
    * @returns a human-readable plain-text report with ASCII visualizations.
    */
-  async stats(tailLines?: number): Promise<string> {
+  async stats(tailLines?: number, locale: Locale = 'zh'): Promise<string> {
     const entries = await this.entries(tailLines)
     const tags = new Map<string, TagStats>()
     for (const entry of entries) {
@@ -193,50 +195,57 @@ export class Telemetry {
       tags.set(entry.tag, stats)
     }
     if (tags.size === 0) {
-      return '```\n⚡ dsh-jev-interceptor\n\n  暂无决策记录\n\n  运行 /jev-on 启用插件后再查看\n```'
+      return translate(locale, 'msg.statsEmpty')
     }
     const lines: string[] = ['```']
-    lines.push('⚡ dsh-jev-interceptor 决策统计')
+    lines.push(translate(locale, 'msg.statsTitle'))
     lines.push('')
     for (const [tag, stats] of tags) {
-      const tagLabel = TAG_LABELS[tag] ?? tag
+      const tagLabel = label(locale, TAG_LABEL_KEYS, tag)
       lines.push(`📋 ${tagLabel}`)
-      lines.push(`   调用 ${stats.calls} 次 │ 降级 ${stats.degraded} │ 缓存 ${stats.cached}`)
+      lines.push(translate(locale, 'msg.statsCalls', {
+        v0: stats.calls,
+        v1: stats.degraded,
+        v2: stats.cached,
+      }))
       // 动作分布横条图
       const actions = [...stats.byAction.entries()].sort((a, b) => b[1] - a[1])
       if (actions.length > 0) {
         lines.push('')
         for (const [action, n] of actions) {
-          const label = ACTION_LABELS[action] ?? action
+          const actionLabel = label(locale, ACTION_LABEL_KEYS, action)
           const barStr = bar(n, stats.calls)
-          lines.push(`   ${padEnd(label, 8)} ${barStr} ${n}`)
+          lines.push(`   ${padEnd(actionLabel, 8)} ${barStr} ${n}`)
         }
       }
       // 延迟
       const latency = percentileLine(stats.latencies)
       if (latency !== undefined) {
-        lines.push(`   延迟 ${latency}`)
+        lines.push(translate(locale, 'msg.statsLatency', { v0: latency }))
       }
       // 成本
       if (stats.totalCostUsd > 0) {
-        lines.push(`   💰 成本 $${stats.totalCostUsd.toFixed(6)} (${stats.totalInputTokens} tokens)`)
+        lines.push(translate(locale, 'msg.statsCost', {
+          v0: stats.totalCostUsd.toFixed(6),
+          v1: stats.totalInputTokens,
+        }))
       }
       // 一致率（approval-loop 专属）
       const bucketEntries = Object.entries(stats.approvalBuckets)
       if (bucketEntries.length > 0) {
         lines.push('')
-        lines.push('   🤝 一致率')
+        lines.push(translate(locale, 'msg.statsAgreement'))
         for (const [bucket, n] of bucketEntries) {
-          const label = BUCKET_LABELS[bucket] ?? bucket
+          const bucketLabel = label(locale, BUCKET_LABEL_KEYS, bucket)
           const icon = bucket === 'would-over-approve' ? (n === 0 ? '✅' : '⚠️') : ''
           const bucketBar = bar(n, stats.calls)
-          lines.push(`   ${padEnd(label, 10)} ${bucketBar} ${n} ${icon}`)
+          lines.push(`   ${padEnd(bucketLabel, 10)} ${bucketBar} ${n} ${icon}`)
         }
       }
       lines.push('')
     }
     lines.push('━'.repeat(44))
-    lines.push('  详细: /jev-stats --all │ 明细: /jev-log │ 状态: /jev-status')
+    lines.push(translate(locale, 'msg.statsFooter'))
     lines.push('```')
     return lines.join('\n')
   }
@@ -408,37 +417,48 @@ export function estimateCostUsd(inputTokens: number | undefined): number | undef
 
 // ── ASCII 可视化辅助 ─────────────────────────────────────────────────────
 
-/** Tag 中文标签 */
-const TAG_LABELS: Readonly<Record<string, string>> = {
-  guard: '守门人（风险分类）',
-  preapprove: '预批（自动审批）',
-  'session-reference': '会话保留打分',
-  'approval-loop': '审批一致率',
-  stagnation: '停滞检测（换参循环）',
+/** Tag label keys for the stats report. */
+const TAG_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  guard: 'msg.tagGuard',
+  preapprove: 'msg.tagPreapprove',
+  'session-reference': 'msg.tagSessionReference',
+  'approval-loop': 'msg.tagApprovalLoop',
+  stagnation: 'msg.tagStagnation',
 }
 
-/** Action 中文标签 */
-const ACTION_LABELS: Readonly<Record<string, string>> = {
-  delegate: '放行',
-  ask: '转人工',
-  deny: '拒绝',
-  'auto-approve': '自动批',
-  human: '人工',
-  degraded: '降级',
-  skipped: '跳过',
-  'retention-scored': '打分保留',
-  'retention-fifo': 'FIFO保留',
-  agreement: '一致率',
-  'stagnation-alert': '停滞提醒',
+/** Action label keys for the stats report. */
+const ACTION_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  delegate: 'msg.actionDelegate',
+  ask: 'msg.actionAsk',
+  deny: 'msg.actionDeny',
+  'auto-approve': 'msg.actionAutoApprove',
+  human: 'msg.actionHuman',
+  degraded: 'msg.actionDegraded',
+  skipped: 'msg.actionSkipped',
+  'retention-scored': 'msg.actionRetentionScored',
+  'retention-fifo': 'msg.actionRetentionFifo',
+  agreement: 'msg.actionAgreement',
+  'stagnation-alert': 'msg.actionStagnationAlert',
 }
 
-/** Agreement bucket 中文标签 */
-const BUCKET_LABELS: Readonly<Record<string, string>> = {
-  'would-over-approve': '误批风险',
-  'aligned-approve': '一致批',
-  'aligned-reject': '一致拒',
-  'friction-human-approved': '多余人工',
-  neutral: '中性',
+/** Agreement bucket label keys (shared by every report). */
+const BUCKET_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  'would-over-approve': 'msg.bucketWouldOverApprove',
+  'aligned-approve': 'msg.bucketAlignedApprove',
+  'aligned-reject': 'msg.bucketAlignedReject',
+  'friction-human-approved': 'msg.bucketFrictionHumanApproved',
+  neutral: 'msg.bucketNeutral',
+}
+
+/**
+ * Translate one enum label, falling back to the raw token.
+ * @param locale - report language.
+ * @param keys - enum value → message key table.
+ * @param value - the enum token to label.
+ */
+function label(locale: Locale, keys: Readonly<Record<string, MessageKey>>, value: string): string {
+  const key = keys[value]
+  return key === undefined ? value : translate(locale, key)
 }
 
 /**
@@ -532,51 +552,52 @@ export function detailPreview(detail: string | undefined, maxChars = 48): string
   return flat.length <= maxChars ? flat : `${flat.slice(0, maxChars)}…`
 }
 
-/** 明细表短标签（比 TAG_LABELS 更紧凑，含全部 tag）。 */
-const LOG_TAG_LABELS: Readonly<Record<string, string>> = {
-  guard: '守门',
-  preapprove: '预批',
-  'session-reference': '保留',
-  'approval-loop': '一致率',
-  stagnation: '停滞',
+/** Short tag labels for the `/jev-log` table. */
+const LOG_TAG_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  guard: 'msg.logTagGuard',
+  preapprove: 'msg.logTagPreapprove',
+  'session-reference': 'msg.logTagSessionReference',
+  'approval-loop': 'msg.logTagApprovalLoop',
+  stagnation: 'msg.logTagStagnation',
 }
 
-/** 明细表模式短标签。 */
-const LOG_MODE_LABELS: Readonly<Record<string, string>> = {
-  shadow: '观察',
-  enforce: '执行',
+/** Short mode labels for the `/jev-log` table. */
+const LOG_MODE_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  shadow: 'msg.logModeShadow',
+  enforce: 'msg.logModeEnforce',
 }
 
-/** 明细表动作短标签（复用 ACTION_LABELS 的键，取两字形态）。 */
-const LOG_ACTION_LABELS: Readonly<Record<string, string>> = {
-  delegate: '放行',
-  ask: '转人工',
-  deny: '拒绝',
-  'auto-approve': '自动批',
-  human: '人工',
-  degraded: '降级',
-  skipped: '跳过',
-  'retention-scored': '打分',
-  'retention-fifo': 'FIFO',
-  agreement: '一致',
-  'stagnation-alert': '提醒',
+/** Short action labels for the `/jev-log` table. */
+const LOG_ACTION_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  delegate: 'msg.logActionDelegate',
+  ask: 'msg.logActionAsk',
+  deny: 'msg.logActionDeny',
+  'auto-approve': 'msg.logActionAutoApprove',
+  human: 'msg.logActionHuman',
+  degraded: 'msg.logActionDegraded',
+  skipped: 'msg.logActionSkipped',
+  'retention-scored': 'msg.logActionRetentionScored',
+  'retention-fifo': 'msg.logActionRetentionFifo',
+  agreement: 'msg.logActionAgreement',
+  'stagnation-alert': 'msg.logActionStagnationAlert',
 }
 
 /**
  * 渲染最近决策明细表（新→旧）：时间(UTC)│挂点│工具│模式│动作│延迟│理由。
  * @param entries - 明细记录（旧→新，内部反转展示）。
  * @param fullPath - 当前日志文件全量路径（页脚展示，可选）。
- * @returns 自带 ``` 包裹的中文表格。
+ * @param locale - table language (default Chinese for legacy callers).
+ * @returns 自带 ``` 包裹的表格。
  */
-export function renderLogTable(entries: readonly TelemetryEntry[], fullPath?: string): string {
+export function renderLogTable(entries: readonly TelemetryEntry[], fullPath?: string, locale: Locale = 'zh'): string {
   const lines: string[] = ['```']
-  lines.push(`⚡ dsh-jev-interceptor 决策明细（最近 ${String(entries.length)} 条）`)
+  lines.push(translate(locale, 'msg.logTitle', { v0: entries.length }))
   lines.push('')
   for (const entry of [...entries].reverse()) {
     const time = entry.ts.slice(11, 19)
-    const tag = LOG_TAG_LABELS[entry.tag] ?? entry.tag
-    const mode = LOG_MODE_LABELS[entry.mode] ?? entry.mode
-    const action = LOG_ACTION_LABELS[entry.action] ?? entry.action
+    const tag = label(locale, LOG_TAG_LABEL_KEYS, entry.tag)
+    const mode = label(locale, LOG_MODE_LABEL_KEYS, entry.mode)
+    const action = label(locale, LOG_ACTION_LABEL_KEYS, entry.action)
     const latency = entry.latencyMs === undefined ? '—' : `${String(entry.latencyMs)}ms`
     lines.push(
       `${time} ${padEnd(tag, 6)} ${padEnd(entry.tool ?? '—', 10)} ${mode} ${padEnd(action, 6)}`
@@ -585,8 +606,8 @@ export function renderLogTable(entries: readonly TelemetryEntry[], fullPath?: st
   }
   lines.push('')
   lines.push('━'.repeat(44))
-  lines.push('  导出: /jev-log <n> --json | --csv')
-  if (fullPath !== undefined) lines.push(`  全量: ${fullPath}`)
+  lines.push(translate(locale, 'msg.logExport'))
+  if (fullPath !== undefined) lines.push(translate(locale, 'msg.logFullPath', { v0: fullPath }))
   lines.push('```')
   return lines.join('\n')
 }

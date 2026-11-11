@@ -1,10 +1,7 @@
-/**
- * Jev Interceptor 宿主侧 Web API：浏览器面板经 Connection 认证围栏读写配置和统计。
- *
- * 形态照 dsh-auto-memory：ctx.connection.fetch.register 注册路由（认证围栏内），
- * 非 web 组合没有 connection 服务时静默 no-op。
- */
+/** Host Web API for authenticated configuration and telemetry access. Register routes through the connection service; skip non-web compositions without that service. */
 
+import type { Locale } from './localization.js'
+import { translate } from './localization.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness } from './calibrate.js'
 import type { ImpactSummary } from './impact.js'
@@ -20,11 +17,11 @@ export interface JevPanelStatus {
   model: string
   keyConfigured: boolean
   keySource: 'config' | 'credentials' | 'env' | 'none'
-  /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
+  /** Settings persistence path; null means changes last only for this run. */
   persistPath: string | null
-  /** 当日已花（USD，进程内记账）；限额见 dailyCostLimitUsd。 */
+  /** Today's process-local USD spending; capped by dailyCostLimitUsd. */
   costTodayUsd: number
-  /** 每日成本限额（USD）；0 = 不限。 */
+  /** Daily spending limit in USD; zero means unlimited. */
   dailyCostLimitUsd: number
   guardEnabled: boolean
   preapproveEnabled: boolean
@@ -49,19 +46,18 @@ export function registerJevApi(
   deps: {
     getStatus: () => JevPanelStatus
     getStats: () => Promise<JevPanelTagSummary[]>
-    /** 校准报告（面板只读展示；纯读，无状态写入）。 */
-    getCalibration: () => Promise<CalibrationReport>
-    /** 效果归因（净收益/成本/延迟汇总，纯读）。 */
+    /** Calibration report for panel display. */
+    getCalibration: (locale?: Locale) => Promise<CalibrationReport>
+    /** Read-only impact summary: benefit, cost, and latency. */
     getImpact: () => Promise<ImpactSummary>
-    /**
-     * 连接测试（发一次最小真实请求；约一次最小决策的成本）。
-     * @param apiKeyOverride - 面板传来的未保存草稿 key；缺省测已配置的 key。
-     */
+    /** Test the connection with one minimal real decision request. @param apiKeyOverride - Unsaved draft key; omit to test the configured key. */
     testConnection: (apiKeyOverride?: string) => Promise<PingResult>
-    /** 决策明细（/log 路由用；detail 只含枚举与数值 token，无敏感数据）。 */
+    /** Decision log; detail contains enum and numeric tokens without sensitive data. */
     getLog: (limit: number) => Promise<TelemetryEntry[]>
-    /** 影子→执行的就绪度评估（面板 hero 的升级提示灯）。 */
-    getReadiness: () => Promise<ShadowReadiness>
+    /** Shadow-to-enforce readiness (the panel hero's promote hint). */
+    getReadiness: (locale?: Locale) => Promise<ShadowReadiness>
+    /** Language of host-generated error copy, resolved per request. */
+    locale: () => Locale
     updateConfig: (patch: Record<string, unknown>) => Promise<{ rejected: string[] }>
   },
 ): void {
@@ -92,7 +88,9 @@ export function registerJevApi(
     path: `${BASE}/calibration`,
     methods: ['GET'],
     requestBody: 'buffered',
-    fetch: async () => json(await deps.getCalibration()),
+    fetch: async (request: Request) => json(await deps.getCalibration(
+      new URL(request.url).searchParams.get('locale') === 'en' ? 'en' : 'zh',
+    )),
   })
 
   connection.fetch.register({
@@ -107,13 +105,13 @@ export function registerJevApi(
     methods: ['POST'],
     requestBody: 'buffered',
     fetch: async (request: Request) => {
-      // 可选 body {apiKey}：测未保存的草稿 key（不落盘）；无 body 测已配置的。
+      // Optional {apiKey} body tests a draft without saving it; otherwise use the configured key.
       let override: string | undefined
       try {
         const body = JSON.parse(await request.text()) as { apiKey?: unknown }
         if (typeof body.apiKey === 'string' && body.apiKey.length >= 10) override = body.apiKey
       } catch {
-        // 无 body 或非 JSON：测已配置的 key。
+        // Missing or non-JSON bodies use the configured key.
       }
       return json(await deps.testConnection(override))
     },
@@ -132,7 +130,9 @@ export function registerJevApi(
     path: `${BASE}/readiness`,
     methods: ['GET'],
     requestBody: 'buffered',
-    fetch: async () => json(await deps.getReadiness()),
+    fetch: async (request: Request) => json(await deps.getReadiness(
+      new URL(request.url).searchParams.get('locale') === 'en' ? 'en' : 'zh',
+    )),
   })
 
   connection.fetch.register({
@@ -151,11 +151,15 @@ export function registerJevApi(
           if (Object.hasOwn(body, key)) patch[key] = body[key]
         }
         if (Object.keys(patch).length === 0) {
-          return json({ error: 'no updatable fields' }, 400)
+          return json({ error: translate(deps.locale(), 'msg.noUpdatableFields') }, 400)
         }
         const { rejected } = await deps.updateConfig(patch)
         if (rejected.length > 0) {
-          return json({ error: `非法值（需 0-1）: ${rejected.join(', ')}` }, 400)
+          return json({
+            error: translate(deps.locale(), 'msg.invalidThreshold', { v0: rejected.join(', ') }),
+            code: 'invalid-threshold',
+            fields: rejected,
+          }, 400)
         }
         return json({ ok: true })
       } catch (error: unknown) {

@@ -1,15 +1,6 @@
-/**
- * Jev 决策面板 —— 视觉与信息结构重设计。
- *
- * 视觉层走真 CSS 类（`data-plugin-css` 幂等注入）+ 官方 `--dsw-alias-*` 主题
- * token：内联 style 没有 hover/focus/媒体查询能力，硬编码 rgba 白字在浅色
- * 主题下也会糊成一片。
- *
- * 信息结构：概览（聚合结论 + 最近决策）/ 决策记录（可筛选明细）/ 阈值校准
- * （按需生成）/ 设置（Provider、端点、Key）。配置不再和统计挤在同一列，
- * 明细也不再是没有表头的单行流。
- */
+/** Jev decision panel: overview, decision log, calibration, and settings. Theme tokens and injected CSS provide hover, focus, and responsive styles in light and dark themes. */
 
+import { t, useLocale, setLocale, getLocale } from './i18n.js'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
@@ -20,11 +11,11 @@ interface JevStatus {
   model: string
   keyConfigured: boolean
   keySource: 'config' | 'credentials' | 'env' | 'none'
-  /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
+  /** Settings persistence path; null means changes last only for this run. */
   persistPath?: string | null
-  /** 当日已花（USD，进程内记账）。 */
+  /** Today's process-local spending in USD. */
   costTodayUsd?: number
-  /** 每日成本限额（USD）；0 = 不限。 */
+  /** Daily spending limit in USD; zero means unlimited. */
   dailyCostLimitUsd?: number
   /** 预批准工具名单（面板可管理，热生效）。 */
   preapproveAllowlist?: string[]
@@ -55,7 +46,7 @@ interface TagSummary {
   agreementBuckets?: Record<string, number>
 }
 
-/** 校准报告（本地镜像宿主 CalibrationReport，面板不 import 宿主类型）。 */
+/** Local mirror of the host CalibrationReport, avoiding browser imports of host types. */
 interface Calibration {
   windowSize: number
   counts: { guard: number; preapprove: number; approvalLoop: number }
@@ -63,13 +54,13 @@ interface Calibration {
   advice: Array<{ param: string; current: number; suggested: number; basis: string; samples: number; note: string }>
   insufficient: Array<{ param: string; reason: string }>
   observations: Array<{ param: string; reason: string }>
-  /** 与上一份快照的对比摘要（无历史时缺失）。 */
+  /** Comparison with the previous snapshot; absent when no history exists. */
   history?: { previousTs: string; adopted: number; ignored: number; manual?: number }
   /** 预批准候选工具（影子数据推导；一键加入名单）。 */
   allowlistSuggestions?: Array<{ tool: string; samples: number; avgConfidence: number; avgIrreversibility: number; maxInjection: number }>
 }
 
-/** 效果归因（本地镜像宿主 ImpactSummary）。 */
+/** Local mirror of the host ImpactSummary. */
 interface Impact {
   windowSize: number
   firstTs?: string
@@ -78,14 +69,14 @@ interface Impact {
   sessions: number
   modeSplit: { shadow: number; enforce: number }
   enforce: { denied: number; asked: number; autoApproved: number; stagnationAlerts: number }
-  /** 一致率分桶按模式拆开：enforce 实际发生，shadow 假设性对照。 */
+  /** Separate actual enforce outcomes from hypothetical shadow comparisons. */
   agreement: { enforce: Record<string, number>; shadow: Record<string, number> }
   cost: { inputTokens: number; costUsd: number; cachedDecisions: number; estimatedCostUsd?: number }
   latency: { p50?: number; p95?: number }
   degraded: { total: number; byReason: Record<string, number> }
 }
 
-/** 决策明细行（本地镜像 TelemetryEntry 子集）。 */
+/** Local subset of TelemetryEntry for decision rows. */
 interface LogEntry {
   ts: string
   tag: string
@@ -105,94 +96,103 @@ interface LogEntry {
 type JevPageProps = PropsRuntime<'main'>
 
 const API = '/api/jev-interceptor'
-/** 自动刷新间隔：状态灯与最近决策不需要秒级新鲜度。 */
+/** Status and recent decisions do not require second-by-second polling. */
 const REFRESH_MS = 20_000
 const CSS_TAG_ID = 'dsh-jev-interceptor/panel.css'
 
-/** 主题色调（变量表达式可直接进 color-mix）。 */
+/** Theme colors that can be used directly in color-mix. */
 const TONE = {
   ok: 'var(--dsw-alias-state-success-primary,#16a34a)',
   warn: 'var(--dsw-alias-state-warn-primary,#d97706)',
   err: 'var(--dsw-alias-state-error-primary,#dc2626)',
   brand: 'var(--dsw-alias-brand-primary,#4d76e6)',
-  /** 第四语义色：DeepSeek 品牌色（官方 state-business 变量）。 */
+  /** DeepSeek's business-state color supplies a fourth semantic tone. */
   business: 'var(--dsw-alias-state-business-primary,#6366f1)',
   muted: 'var(--dsw-alias-label-secondary,#8a8a8a)',
 } as const
 
 type Tone = keyof typeof TONE
 
-const MODE_LABEL: Record<string, string> = { shadow: '观察', enforce: '执行' }
-
-const MODE_HINT: Record<string, string> = {
-  shadow: '只记录决策，不拦截也不放行',
-  enforce: '按决策放行或转人工',
+function modeLabels(): Record<string, string> {
+  return { shadow: t('panel.shadow'), enforce: t('panel.enforce') }
 }
 
-/** 决策环节（tag）的中文名、一句话说明与专属色调（每个环节一种颜色）。 */
-const TAG_META: Record<string, { label: string; hint: string; tone: Tone }> = {
-  guard: { label: '守门人', hint: '工具调用的风险 / 不可逆 / 注入判断', tone: 'brand' },
-  preapprove: { label: '预批准', hint: '明确已授权就免点击', tone: 'ok' },
-  'session-reference': { label: '会话保留', hint: '@ 引用快照的价值打分', tone: 'business' },
-  'approval-loop': { label: '审批一致率', hint: '影子决策与人工决定的对照', tone: 'muted' },
-  stagnation: { label: '停滞检测', hint: '重复失败时提醒换路', tone: 'warn' },
+function modeHints(): Record<string, string> {
+  return {
+    shadow: t('panel.recordDecisionsWithoutBlockingOrApprovingCalls'),
+    enforce: t('panel.approveCallsOrRequestHumanReviewBased'),
+  }
 }
 
-/**
- * 决策动作的中文名与色调。视觉编码约定：
- * - 实色 = Jev 生效的决策（放行紫 / 转人工橙 / 拒绝红 / 自动批绿 / 人工蓝 / 打分绿）；
- * - 斜纹半透明（isFallback）= 降级回退（决策系统没工作，走默认）；
- * - 实灰 = 默认/跳过类。同一张卡内共现的动作颜色互异。
- */
-const ACTION_META: Record<string, { label: string; tone: Tone; fallback?: boolean }> = {
-  delegate: { label: '放行', tone: 'business' },
-  ask: { label: '转人工', tone: 'warn' },
-  deny: { label: '拒绝', tone: 'err' },
-  'auto-approve': { label: '自动批准', tone: 'ok' },
-  human: { label: '人工决定', tone: 'brand' },
-  degraded: { label: '降级放行', tone: 'muted', fallback: true },
-  skipped: { label: '跳过', tone: 'muted' },
-  'retention-scored': { label: '打分保留', tone: 'ok' },
-  'retention-fifo': { label: 'FIFO 淘汰', tone: 'muted' },
-  agreement: { label: '一致率', tone: 'brand' },
-  'stagnation-alert': { label: '停滞提醒', tone: 'warn' },
+/** Localized stage labels, descriptions, and distinct semantic tones. */
+function tagMetadata(): Record<string, { label: string; hint: string; tone: Tone }> {
+  return {
+    guard: { label: t('panel.guard'), hint: t('panel.assessToolCallRiskIrreversibilityAndInjection'), tone: 'brand' },
+    preapprove: { label: t('panel.preapproval'), hint: t('panel.skipConfirmationWhenAuthorizationIsClear'), tone: 'ok' },
+    'session-reference': { label: t('panel.sessionRetention'), hint: t('panel.scoreTheValueOfReferenceSnapshots'), tone: 'business' },
+    'approval-loop': { label: t('panel.approvalAgreement'), hint: t('panel.compareShadowDecisionsWithHumanDecisions'), tone: 'muted' },
+    stagnation: { label: t('panel.stagnationDetection'), hint: t('panel.suggestADifferentApproachAfterRepeatedFailures'), tone: 'warn' },
+  }
 }
 
-/** 降级回退的斜纹底（与实色决策形成"生效/未生效"的视觉区分）。 */
+/** Action labels and tones: solid colors indicate active decisions, stripes indicate fallback, and gray indicates defaults or skips. */
+function actionMetadata(): Record<string, { label: string; tone: Tone; fallback?: boolean }> {
+  return {
+    delegate: { label: t('panel.allow'), tone: 'business' },
+    ask: { label: t('panel.humanReview'), tone: 'warn' },
+    deny: { label: t('panel.deny'), tone: 'err' },
+    'auto-approve': { label: t('panel.autoApprove'), tone: 'ok' },
+    human: { label: t('panel.humanDecision'), tone: 'brand' },
+    degraded: { label: t('panel.fallbackAllow'), tone: 'muted', fallback: true },
+    skipped: { label: t('panel.skipped'), tone: 'muted' },
+    'retention-scored': { label: t('panel.scoreBasedRetention'), tone: 'ok' },
+    'retention-fifo': { label: t('panel.fifoEviction'), tone: 'muted' },
+    agreement: { label: t('panel.agreement'), tone: 'brand' },
+    'stagnation-alert': { label: t('panel.stagnationAlert'), tone: 'warn' },
+  }
+}
+
+/** Stripes distinguish fallback from active decisions. */
 const FADED_FILL = 'repeating-linear-gradient(45deg, var(--dsw-alias-label-secondary,#8a8a8a) 0 3px, transparent 3px 7px)'
 
 function actionMeta(action: string): { label: string; tone: Tone; fallback?: boolean } {
-  return ACTION_META[action] ?? { label: action, tone: 'brand' }
+  return actionMetadata()[action] ?? { label: action, tone: 'brand' }
 }
 
-/** 图例色块 / 堆叠条段的背景：降级类用斜纹，其余实色。 */
+/** Legend and stacked-bar fills: striped fallback, solid active decisions. */
 function actionFill(meta: { tone: Tone; fallback?: boolean }): string {
   return meta.fallback === true ? FADED_FILL : TONE[meta.tone]
 }
 
-/** 一致率分桶（approval-loop 专属）：标签 + 语义色调。 */
-const BUCKET_LABEL: Record<string, { label: string; tone: Tone }> = {
-  'would-over-approve': { label: '本会误批', tone: 'err' },
-  'aligned-approve': { label: '与人工一致（准）', tone: 'ok' },
-  'aligned-reject': { label: '与人工一致（拒）', tone: 'ok' },
-  'friction-human-approved': { label: '多一次人工确认', tone: 'warn' },
-  neutral: { label: '中性', tone: 'muted' },
+/** Approval-loop agreement bucket labels and semantic tones. */
+function bucketLabels(): Record<string, { label: string; tone: Tone }> {
+  return {
+    'would-over-approve': { label: t('panel.wouldOverApprove'), tone: 'err' },
+    'aligned-approve': { label: t('panel.alignedApprove'), tone: 'ok' },
+    'aligned-reject': { label: t('panel.alignedReject'), tone: 'ok' },
+    'friction-human-approved': { label: t('panel.extraHumanConfirmation'), tone: 'warn' },
+    neutral: { label: t('panel.neutral'), tone: 'muted' },
+  }
 }
 
-const PROVIDERS = [
-  { id: 'typesafe', label: 'TypeSafe', hint: '官方 Jev 端点，延迟最低' },
-  { id: 'openrouter', label: 'OpenRouter', hint: '经 OpenRouter 代理，无需等待名单' },
-  { id: 'custom', label: '自定义', hint: '兼容 Jev 协议的代理或自建端点' },
-]
-
-const KEY_SOURCE: Record<string, string> = {
-  config: '面板或配置文件',
-  credentials: '凭据库',
-  env: '环境变量',
-  none: '未配置',
+function providers() {
+  return [
+    { id: 'typesafe', label: 'TypeSafe', hint: t('panel.officialJevEndpointWithTheLowestLatency') },
+    { id: 'openrouter', label: 'OpenRouter', hint: t('panel.accessThroughOpenrouterNoWaitlistRequired') },
+    { id: 'custom', label: t('panel.custom'), hint: t('panel.proxyOrSelfHostedEndpointCompatibleWith') },
+  ]
 }
 
-/** 连接测试结果（本地镜像宿主 PingResult）。 */
+function keySources(): Record<string, string> {
+  return {
+    config: t('panel.panelOrConfigurationFile'),
+    credentials: t('panel.credentialStore'),
+    env: t('panel.environmentVariable'),
+    none: t('panel.notConfigured'),
+  }
+}
+
+/** Local mirror of the host PingResult. */
 interface PingResult {
   ok: boolean
   latencyMs: number
@@ -200,42 +200,46 @@ interface PingResult {
   error?: string
 }
 
-/** 连接测试错误码 → 中文（rate-limited 视为成功，key 已通过认证）。 */
-const PING_ERROR: Record<string, string> = {
-  'no-key': '未配置 API Key',
-  'network': '网络错误：无法连接端点',
-  'timeout': '超时：检查网络/代理，或端点响应过慢',
-  'auth': '认证失败：Key 无效或已过期',
-  'not-found': '端点不存在：检查 Provider 或 Base URL',
-  'rate-limited': 'Key 有效（当前限流中，稍后即可正常使用）',
-  'server': '服务端错误：Provider 侧问题',
-  'invalid-response': '响应格式异常：端点可能不是 Jev decisions API',
+/** Localized connection errors; rate limiting still confirms successful authentication. */
+function pingErrors(): Record<string, string> {
+  return {
+    'no-key': t('panel.apiKeyIsNotConfigured'),
+    'network': t('panel.networkErrorCannotReachTheEndpoint'),
+    'timeout': t('panel.timedOutCheckTheNetworkProxyOr'),
+    'auth': t('panel.authenticationFailedTheKeyIsInvalidOr'),
+    'not-found': t('panel.endpointNotFoundCheckProviderOrBase'),
+    'rate-limited': t('panel.keyIsValidRateLimitedTryAgain'),
+    'server': t('panel.serverErrorProviderIssue'),
+    'invalid-response': t('panel.unexpectedResponseTheEndpointMayNotSupport'),
+  }
 }
 
-/** Key 脱敏：保留头 3 尾 4，中间打码；过短的 key 全打码。 */
+/** Keep the first three and last four key characters; mask short keys entirely. */
 function maskKey(value: string): string {
   const v = value.trim()
   if (v.length <= 8) return '••••••••'
   return `${v.slice(0, 3)}••••${v.slice(-4)}`
 }
 
-/** 连接测试结果的一行文案。 */
+/** One-line connection test result. */
 function pingText(result: PingResult): string {
   if (result.ok && result.error === undefined) {
-    return `连接正常${result.model !== undefined ? ` · ${result.model}` : ''} · ${String(result.latencyMs)}ms`
+    return t('panel.connectedMs', { v0: result.model !== undefined ? ` · ${result.model}` : '', v1: String(result.latencyMs) })
   }
-  if (result.error === 'rate-limited') return `Key 有效（当前限流中）· ${String(result.latencyMs)}ms`
-  return `${PING_ERROR[result.error ?? ''] ?? `失败（${result.error ?? '未知错误'}）`} · ${String(result.latencyMs)}ms`
+  if (result.error === 'rate-limited') return t('panel.keyIsValidRateLimitedMs', { v0: String(result.latencyMs) })
+  return `${pingErrors()[result.error ?? ''] ?? t('panel.failed', { v0: result.error ?? t('panel.unknownError') })} · ${String(result.latencyMs)}ms`
 }
 
-const TABS = [
-  { id: 'overview', label: '概览' },
-  { id: 'log', label: '决策记录' },
-  { id: 'calibration', label: '阈值校准' },
-  { id: 'settings', label: '设置' },
-] as const
+function tabs() {
+  return [
+    { id: 'overview', label: t('panel.overview') },
+    { id: 'log', label: t('panel.decisionLog') },
+    { id: 'calibration', label: t('panel.thresholdCalibration') },
+    { id: 'settings', label: t('panel.settings') },
+  ] as const
+}
 
-/** 面板样式表（官方主题 token 驱动；深浅主题与第三方主题自动跟随）。 */
+/** Panel CSS follows official theme tokens for light, dark, and third-party themes. */
 export const PANEL_CSS = `
 .jev-root{height:100%;min-height:0;max-height:100vh;box-sizing:border-box;padding:20px 24px 24px;display:flex;flex-direction:column;gap:14px;max-width:1120px;font-size:13px;line-height:1.55;color:var(--dsw-alias-label-primary);}
 .jev-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;}
@@ -349,7 +353,7 @@ export const PANEL_CSS = `
 @media (max-width:620px){.jev-root{padding:14px;}.jev-thead{display:none;}.jev-row{grid-template-columns:78px minmax(0,1fr) auto;row-gap:2px;}.jev-col-tag,.jev-col-lat,.jev-col-mode,.jev-col-detail{display:none;}}
 `
 
-/** 幂等注入面板样式（官方 data-plugin-css 约定）。 */
+/** Inject panel styles once, following the data-plugin-css convention. */
 export function injectPanelCss(): void {
   if (typeof document === 'undefined') return
   if (document.querySelector(`style[data-plugin-css="${CSS_TAG_ID}"]`) !== null) return
@@ -360,7 +364,7 @@ export function injectPanelCss(): void {
   document.head.appendChild(tag)
 }
 
-/** 半透明底色拼装（color-mix 里放主题变量，深浅主题都自洽）。 */
+/** Theme-aware translucent background using color-mix. */
 function tint(color: string, amount: number): string {
   return `color-mix(in srgb,${color} ${String(amount)}%,transparent)`
 }
@@ -369,7 +373,7 @@ function pad2(value: number): string {
   return String(value).padStart(2, '0')
 }
 
-/** ISO 时间戳 → 本地 HH:MM:SS。 */
+/** ISO timestamp to local HH:MM:SS. */
 function clockOf(ts: string): string {
   const millis = Date.parse(ts)
   if (!Number.isFinite(millis)) return '--:--:--'
@@ -377,21 +381,21 @@ function clockOf(ts: string): string {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`
 }
 
-/** 相对时间（刷新时才重算，够用）。 */
+/** Relative time is recalculated when the panel refreshes. */
 function relativeOf(ts: string): string {
   const millis = Date.parse(ts)
   if (!Number.isFinite(millis)) return ''
   const delta = Date.now() - millis
   if (!Number.isFinite(delta) || delta < 0) return ''
-  if (delta < 5_000) return '刚刚'
-  if (delta < 60_000) return `${String(Math.floor(delta / 1_000))} 秒前`
-  if (delta < 3_600_000) return `${String(Math.floor(delta / 60_000))} 分钟前`
-  if (delta < 86_400_000) return `${String(Math.floor(delta / 3_600_000))} 小时前`
-  return `${String(Math.floor(delta / 86_400_000))} 天前`
+  if (delta < 5_000) return t('panel.justNow')
+  if (delta < 60_000) return t('panel.sAgo', { v0: String(Math.floor(delta / 1_000)) })
+  if (delta < 3_600_000) return t('panel.mAgo', { v0: String(Math.floor(delta / 60_000)) })
+  if (delta < 86_400_000) return t('panel.hAgo', { v0: String(Math.floor(delta / 3_600_000)) })
+  return t('panel.dAgo', { v0: String(Math.floor(delta / 86_400_000)) })
 }
 
 function fmtNum(value: number | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('zh-CN') : '0'
+  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString(getLocale() === 'zh' ? 'zh-CN' : 'en-US') : '0'
 }
 
 function shortId(value: string | undefined): string {
@@ -400,63 +404,63 @@ function shortId(value: string | undefined): string {
 }
 
 
-/** 美元格式化（与宿主 renderImpact 的 usd() 同口径：<$0.01 用 6 位小数）。 */
+/** Match host renderImpact formatting: six decimals below $0.01. */
 function fmtUsd(value: number): string {
   return `$${value < 0.01 ? value.toFixed(6) : value.toFixed(4)}`
 }
 
-/** 净收益卡的成本指标（有记录值用记录值，全缺时给估算，都没有返回空串）。 */
+/** Prefer recorded cost, then estimated cost, then an empty string. */
 function fmtUsdCard(cost: Impact['cost']): string {
   if (cost.costUsd > 0) return fmtUsd(cost.costUsd)
   if (cost.estimatedCostUsd !== undefined) return `≈${fmtUsd(cost.estimatedCostUsd)}`
   return ''
 }
 
-/** 误批徽章：零分母（预批未触发）如实标"无样本"，不把 0/0 包装成 0。 */
+/** Show missing samples explicitly rather than presenting 0/0 as zero. */
 function misApprovalBadge(impact: Impact): React.JSX.Element {
   const enforceWoap = impact.agreement.enforce['would-over-approve'] ?? 0
   const hasSamples = enforceWoap > 0 || impact.enforce.autoApproved > 0
     || Object.values(impact.agreement.enforce).some(n => n > 0)
-  if (!hasSamples) return <Badge tone="muted">误批 — 无样本</Badge>
+  if (!hasSamples) return <Badge tone="muted">{t('panel.overApprovalsNoSamples')}</Badge>
   return enforceWoap === 0
-    ? <Badge tone="ok">误批 0</Badge>
-    : <Badge tone="err">{`误批 ${fmtNum(enforceWoap)} ⚠️`}</Badge>
+    ? <Badge tone="ok">{t('panel.overApprovals0')}</Badge>
+    : <Badge tone="err">{t('panel.overApprovals', { v0: fmtNum(enforceWoap) })}</Badge>
 }
 
-/** 净收益卡的一句话（与宿主 renderImpact 的分支同构）。 */
+/** Match the host renderImpact summary branches. */
 function oneLineSummary(impact: Impact): string {
   const costText = fmtUsdCard(impact.cost)
-  const suffix = impact.cost.cachedDecisions > 0 ? `（${fmtNum(impact.cost.cachedDecisions)} 次缓存命中免费）` : ''
+  const suffix = impact.cost.cachedDecisions > 0 ? t('panel.cacheHitsAtNoCost', { v0: fmtNum(impact.cost.cachedDecisions) }) : ''
   if (impact.enforce.autoApproved > 0 || impact.enforce.denied > 0) {
-    return `${fmtNum(impact.enforce.autoApproved + impact.enforce.denied)} 次该人工把关的判断被自动完成，`
-      + `误批 ${fmtNum(impact.agreement.enforce['would-over-approve'] ?? 0)} 次`
-      + (costText.length > 0 ? `，成本 ${costText}` : '')
+    return t('panel.decisionsHandledAutomatically', { v0: fmtNum(impact.enforce.autoApproved + impact.enforce.denied) })
+      + t('panel.overApprovals2', { v0: fmtNum(impact.agreement.enforce['would-over-approve'] ?? 0) })
+      + (costText.length > 0 ? t('panel.cost', { v0: costText }) : '')
       + suffix
   }
   if (impact.enforce.asked + impact.enforce.stagnationAlerts > 0) {
-    return `enforce 期已转人工 ${fmtNum(impact.enforce.asked)} 次、停滞提醒 ${fmtNum(impact.enforce.stagnationAlerts)} 次，还没有自动批准或拦截${suffix}`
+    return t('panel.enforceHumanReviewsAndStagnationAlertsNo', { v0: fmtNum(impact.enforce.asked), v1: fmtNum(impact.enforce.stagnationAlerts), v2: suffix })
   }
-  if (impact.modeSplit.shadow > 0) return `enforce 期还没有生效动作；shadow 期数据在积累校准依据${suffix}`
-  return `enforce 期还没有生效动作${suffix}`
+  if (impact.modeSplit.shadow > 0) return t('panel.noEnforceActionsYetShadowDataIs', { v0: suffix })
+  return t('panel.noEnforceActionsYet', { v0: suffix })
 }
 
 function tagMeta(tag: string): { label: string; hint: string; tone: Tone } {
-  return TAG_META[tag] ?? { label: tag, hint: '', tone: 'muted' }
+  return tagMetadata()[tag] ?? { label: tag, hint: '', tone: 'muted' }
 }
 
-/** 阈值参数名的归属色调（guard* → 守门人蓝，preapprove* → 预批准绿）。 */
+/** Parameter colors: guard is blue, preapproval is green. */
 function paramTone(param: string): Tone {
   if (param.startsWith('guard')) return 'brand'
   if (param.startsWith('preapprove')) return 'ok'
   return 'muted'
 }
 
-/** 一条决策的稳定行键（ts 可能重复，附加序号）。 */
+/** Include the index because timestamps may repeat. */
 function entryKey(entry: LogEntry, index: number): string {
   return `${entry.ts}|${entry.callId ?? entry.tool ?? ''}|${entry.action}|${String(index)}`
 }
 
-/** 取 JSON；非 2xx 抛出带 status 的错误，供上层区分 401/404。 */
+/** Fetch JSON and retain HTTP status so callers can distinguish 401 from 404. */
 async function getJson(path: string): Promise<unknown> {
   const response = await fetch(API + path, { headers: { 'cache-control': 'no-store' } })
   if (!response.ok) {
@@ -467,7 +471,7 @@ async function getJson(path: string): Promise<unknown> {
   return await response.json() as unknown
 }
 
-/** 写配置；失败时把服务端 error 文案抛出来。 */
+/** Update configuration, surfacing server errors on failure. */
 async function putConfig(patch: Record<string, unknown>): Promise<void> {
   const response = await fetch(`${API}/config`, {
     method: 'PUT',
@@ -477,10 +481,12 @@ async function putConfig(patch: Record<string, unknown>): Promise<void> {
   if (response.ok) return
   let detail = `HTTP ${String(response.status)}`
   try {
-    const body = await response.json() as { error?: unknown }
-    if (typeof body.error === 'string') detail = body.error
+    const body = await response.json() as { error?: unknown; code?: unknown; fields?: unknown }
+    if (body.code === 'invalid-threshold' && Array.isArray(body.fields)) {
+      detail = t('panel.invalidThreshold', { fields: body.fields.join(', ') })
+    } else if (typeof body.error === 'string') detail = body.error
   } catch {
-    // 响应不是 JSON：保留状态码文案。
+    // Preserve the HTTP status when the response is not JSON.
   }
   throw new Error(detail)
 }
@@ -532,7 +538,7 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   return <div className="jev-fact"><span>{label}</span><b>{children}</b></div>
 }
 
-/** 单个决策环节的分布卡：环节专属色条 + 堆叠条 + 图例。 */
+/** Per-stage distribution card with a stage color, stacked bar, and legend. */
 /** 每日决策量柱状图（近 14 个活跃日；主体=常规决策，顶段=拦截/转人工）。
  * 按可视化规范：堆叠段间 2px 表面间隙、柱顶 4px 圆角、基线、色点图例。 */
 function DailyTrend({ log }: { log: LogEntry[] }): React.JSX.Element | null {
@@ -555,18 +561,18 @@ function DailyTrend({ log }: { log: LogEntry[] }): React.JSX.Element | null {
     <section className="jev-card">
       <header className="jev-card-head">
         <div>
-          <div className="jev-card-title">每日决策量</div>
-          <div className="jev-card-sub">近 {String(days.length)} 个活跃日</div>
+          <div className="jev-card-title">{t('panel.dailyDecisions')}</div>
+          <div className="jev-card-sub">{t('panel.lastNActiveDays', { v0: String(days.length) })}</div>
         </div>
         {/* 标准色点图例：两段成分，不用文字解释图本身 */}
         <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
-            <i style={{ width: 9, height: 9, borderRadius: 2, background: TONE.brand, display: 'inline-block' }} />常规决策
+            <i style={{ width: 9, height: 9, borderRadius: 2, background: TONE.brand, display: 'inline-block' }} />{t('panel.routineDecisions')}
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
-            <i style={{ width: 9, height: 9, borderRadius: 2, background: TONE.warn, display: 'inline-block' }} />拦截 / 转人工
+            <i style={{ width: 9, height: 9, borderRadius: 2, background: TONE.warn, display: 'inline-block' }} />{t('panel.flaggedEscalated')}
           </span>
-          <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))' }}>{`峰值 ${String(max)}/天`}</span>
+          <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))' }}>{t('panel.peakPerDay', { v0: String(max) })}</span>
         </div>
       </header>
       {/* 图表区封顶：柱宽 ≤28px（14 根 × (28+6) - 6 ≈ 446px），不随卡片宽度无限变粗 */}
@@ -582,7 +588,7 @@ function DailyTrend({ log }: { log: LogEntry[] }): React.JSX.Element | null {
           {days.map(([day, { total, flagged }]) => (
             <div
               key={day}
-              title={`${day.slice(5)} · 共 ${String(total)} 次${flagged > 0 ? `（拦截/转人工 ${String(flagged)}）` : ''}`}
+              title={flagged > 0 ? t('panel.dayTooltipFlagged', { v0: day.slice(5), v1: String(total), v2: String(flagged) }) : t('panel.dayTooltip', { v0: day.slice(5), v1: String(total) })}
               style={{ flex: '1 1 0', maxWidth: 28, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}
             >
               {flagged > 0 && (
@@ -634,8 +640,8 @@ function ToolTopCard({ log }: { log: LogEntry[] }): React.JSX.Element | null {
     <section className="jev-card">
       <header className="jev-card-head">
         <div>
-          <div className="jev-card-title">工具 Top 8</div>
-          <div className="jev-card-sub">决策量与动作构成（统计窗口内）</div>
+          <div className="jev-card-title">{t('panel.toolTop8')}</div>
+          <div className="jev-card-sub">{t('panel.decisionVolumeAndActionMix')}</div>
         </div>
       </header>
       {tools.map(([tool, { total, byAction }]) => (
@@ -652,7 +658,6 @@ function ToolTopCard({ log }: { log: LogEntry[] }): React.JSX.Element | null {
     </section>
   )
 }
-
 function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
   const meta = tagMeta(summary.tag)
   const toneColor = TONE[meta.tone]
@@ -673,16 +678,16 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
           <div className="jev-card-sub">{meta.hint}</div>
         </div>
         <div className="jev-card-metrics">
-          <div>{fmtNum(total)} 次</div>
+          <div>{t('panel.callCount', { count: fmtNum(total) })}</div>
           {summary.latencyP50 !== undefined ? <div>{`p50 ${String(summary.latencyP50)} / p95 ${String(summary.latencyP95 ?? summary.latencyP50)}ms`}</div> : null}
           {summary.costUsd !== undefined && summary.costUsd > 0 ? <div>{fmtUsd(summary.costUsd)}</div> : null}
-          {summary.cached > 0 ? <div style={{ color: TONE.business }}>{`⚡缓存 ${String(summary.cached)}`}</div> : null}
-          {summary.degraded > 0 ? <div style={{ color: TONE.warn }}>{`降级 ${String(summary.degraded)}`}</div> : null}
+          {summary.cached > 0 ? <div style={{ color: TONE.business }}>{t('panel.cachedCount', { v0: String(summary.cached) })}</div> : null}
+          {summary.degraded > 0 ? <div style={{ color: TONE.warn }}>{t('panel.fallbacks', { v0: String(summary.degraded) })}</div> : null}
         </div>
       </header>
       <div className="jev-stack">
         {entries.length === 0
-          ? <i title="窗口内没有决策" style={{ width: '100%', background: TONE.muted, opacity: .22 }} />
+          ? <i title={t('panel.noDecisionsInThisWindow')} style={{ width: '100%', background: TONE.muted, opacity: .22 }} />
           : entries.map(entry => (
             <i
               key={entry[0]}
@@ -697,7 +702,7 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
           ))}
       </div>
       {entries.length === 0
-        ? <p className="jev-note">窗口内还没有记录。</p>
+        ? <p className="jev-note">{t('panel.noRecordsInThisWindowYet')}</p>
         : (
           <ul className="jev-legend">
             {entries.map(entry => (
@@ -713,7 +718,7 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
       {buckets.length === 0 ? null : (
         <ul className="jev-mini">
           {buckets.map(entry => {
-            const bucket = BUCKET_LABEL[entry[0]] ?? { label: entry[0], tone: 'muted' as Tone }
+            const bucket = bucketLabels()[entry[0]] ?? { label: entry[0], tone: 'muted' as Tone }
             const color = TONE[bucket.tone]
             return (
               <li key={entry[0]}>
@@ -728,7 +733,7 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
   )
 }
 
-/** 一条决策明细（点击展开全字段；展开时把详情滚进视野，不被视口裁掉）。 */
+/** Expand a decision row to show all fields and scroll the details into view. */
 function LogRow({ entry, open, onToggle }: {
   entry: LogEntry
   open: boolean
@@ -736,7 +741,7 @@ function LogRow({ entry, open, onToggle }: {
 }): React.JSX.Element {
   const detailRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
-    // 表格末尾的行展开后，详情会延伸到视口之外——自动滚到最近可见位置。
+    // Keep expanded details visible when a row is near the bottom of the viewport.
     if (open && detailRef.current !== null) {
       detailRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     }
@@ -763,25 +768,25 @@ function LogRow({ entry, open, onToggle }: {
       <span className="jev-cell jev-mono jev-col-tool" title={entry.tool ?? ''}>{entry.tool ?? '—'}</span>
       <span className="jev-cell"><Badge tone={meta.tone}>{meta.label}</Badge></span>
       <span className="jev-cell jev-num jev-col-lat">{latency}</span>
-      <span className="jev-cell jev-num jev-col-mode">{MODE_LABEL[entry.mode] ?? entry.mode}</span>
+      <span className="jev-cell jev-num jev-col-mode">{modeLabels()[entry.mode] ?? entry.mode}</span>
       <span className="jev-cell jev-mono jev-detail jev-col-detail" title={detail}>{detail.length === 0 ? '—' : detail}</span>
       {open && (
         <div ref={detailRef} className="jev-detail-full">
-          <div className="jev-kv"><span>模式</span><b>{`${MODE_LABEL[entry.mode] ?? entry.mode}（${entry.mode === 'shadow' ? '未生效' : '已生效'}）`}</b></div>
-          <div className="jev-kv"><span>模型</span><b>{entry.model ?? '—'}</b></div>
-          <div className="jev-kv"><span>工具</span><b>{entry.tool ?? '—'}</b></div>
-          <div className="jev-kv"><span>调用</span><b className="jev-mono" title={entry.callId ?? ''}>{shortId(entry.callId)}</b></div>
-          <div className="jev-kv"><span>会话</span><b className="jev-mono" title={entry.sessionId ?? ''}>{shortId(entry.sessionId)}</b></div>
-          <div className="jev-kv"><span>输入 Token</span><b>{entry.inputTokens === undefined ? '—' : fmtNum(entry.inputTokens)}</b></div>
-          <div className="jev-kv"><span>成本</span><b>{entry.costUsd === undefined ? '—' : `$${entry.costUsd.toFixed(6)}`}</b></div>
-          <div className="jev-kv" style={{ gridColumn: '1/-1' }}><span>详情</span><b className="jev-mono" style={{ whiteSpace: 'normal' }}>{detail.length === 0 ? '—' : detail}</b></div>
+          <div className="jev-kv"><span>{t('panel.mode')}</span><b>{`${modeLabels()[entry.mode] ?? entry.mode} (${entry.mode === 'shadow' ? t('panel.inactive') : t('panel.active')})`}</b></div>
+          <div className="jev-kv"><span>{t('panel.model')}</span><b>{entry.model ?? '—'}</b></div>
+          <div className="jev-kv"><span>{t('panel.tool')}</span><b>{entry.tool ?? '—'}</b></div>
+          <div className="jev-kv"><span>{t('panel.call')}</span><b className="jev-mono" title={entry.callId ?? ''}>{shortId(entry.callId)}</b></div>
+          <div className="jev-kv"><span>{t('panel.session')}</span><b className="jev-mono" title={entry.sessionId ?? ''}>{shortId(entry.sessionId)}</b></div>
+          <div className="jev-kv"><span>{t('panel.inputTokens')}</span><b>{entry.inputTokens === undefined ? '—' : fmtNum(entry.inputTokens)}</b></div>
+          <div className="jev-kv"><span>{t('panel.cost2')}</span><b>{entry.costUsd === undefined ? '—' : `$${entry.costUsd.toFixed(6)}`}</b></div>
+          <div className="jev-kv" style={{ gridColumn: '1/-1' }}><span>{t('panel.details')}</span><b className="jev-mono" style={{ whiteSpace: 'normal' }}>{detail.length === 0 ? '—' : detail}</b></div>
         </div>
       )}
     </div>
   )
 }
 
-/** 概览里的紧凑明细行（最近几条）。 */
+/** Compact recent-decision row for the overview. */
 function MiniRow({ entry }: { entry: LogEntry }): React.JSX.Element {
   const meta = actionMeta(entry.action)
   return (
@@ -795,6 +800,7 @@ function MiniRow({ entry }: { entry: LogEntry }): React.JSX.Element {
 }
 
 export function JevPage(_props: JevPageProps): React.JSX.Element {
+  const locale = useLocale()
   const [status, setStatus] = useState<JevStatus | null>(null)
   const [stats, setStats] = useState<TagSummary[]>([])
   const [log, setLog] = useState<LogEntry[]>([])
@@ -810,7 +816,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [calibBusy, setCalibBusy] = useState(false)
   const [keyDraft, setKeyDraft] = useState('')
-  // 保存成功后的脱敏展示：不清空输入栏，以掩码回填并锁定，「更换」解锁。
+  // Preserve a masked, locked value after saving; Replace unlocks the field.
   const [keyLocked, setKeyLocked] = useState(false)
   const [keyMask, setKeyMask] = useState('')
   const [showKey, setShowKey] = useState(false)
@@ -821,7 +827,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [filterMode, setFilterMode] = useState('all')
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
-  // 决策记录分页：一次拉满 API 上限 500 条本地分页，翻页零延迟。
+  // Fetch up to 500 rows once and paginate locally without network round trips.
   const [logPage, setLogPage] = useState(1)
   const [pageJump, setPageJump] = useState('')
 
@@ -833,7 +839,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         getJson('/stats'),
         getJson('/log?limit=500'),
         getJson('/impact'),
-        getJson('/readiness'),
+        getJson(`/readiness?locale=${getLocale()}`),
       ])
       if (statusResult.status === 'fulfilled') {
         setStatus(statusResult.value as JevStatus)
@@ -841,10 +847,10 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       } else {
         const code = (statusResult.reason as { status?: number } | undefined)?.status
         setLoadErr(code === 401
-          ? '需要登录后才能读取面板数据。'
+          ? t('panel.signInToReadPanelData')
           : code === 404
-            ? '当前组合没有注册面板 API（需要 web 组合）。'
-            : '无法连接本地 API，请确认 dsh 宿主仍在运行。')
+            ? t('panel.thePanelApiIsNotRegisteredIn')
+            : t('panel.cannotReachTheLocalApiCheckThat'))
       }
       if (statsResult.status === 'fulfilled') {
         setStats(Array.isArray(statsResult.value) ? statsResult.value as TagSummary[] : [])
@@ -868,7 +874,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
 
   useEffect(() => { void load(false) }, [])
 
-  // 自动刷新：页面不可见时跳过，避免后台空转。
+  // Skip automatic refresh while hidden to avoid background requests.
   useEffect(() => {
     if (!autoRefresh) return undefined
     const timer = setInterval(() => {
@@ -878,14 +884,14 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     return () => { clearInterval(timer) }
   }, [autoRefresh, load])
 
-  // 提示 4 秒后自动消失。
+  // Dismiss feedback after four seconds.
   useEffect(() => {
     if (toast === null) return undefined
     const timer = setTimeout(() => { setToast(null) }, 4_000)
     return () => { clearTimeout(timer) }
   }, [toast])
 
-  /** 乐观更新 + 失败回滚的统一写入口。 */
+  /** Shared configuration update with optimistic state and rollback on failure. */
   const applyPatch = useCallback(async (
     busyKey: string,
     patch: Record<string, unknown>,
@@ -897,19 +903,19 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     if (previous !== null && optimistic !== undefined) setStatus({ ...previous, ...optimistic })
     try {
       await putConfig(patch)
-      // 诚实反馈：设置服务不落盘时（persistPath 探测为 null）明确说"重启丢失"。
+      // Explicitly warn when the settings service cannot persist changes across restarts.
       const volatile = previous !== null && previous.persistPath === null
       setToast({
         tone: volatile ? 'warn' : 'ok',
         text: volatile
-          ? '已生效（仅本运行）：设置服务不落盘，重启丢失——请写入 cordis.patch.yml 的 jev-interceptor 行'
-          : '已保存',
+          ? t('panel.appliedForThisRunOnlySettingsAre')
+          : t('panel.saved'),
       })
       void load(true)
       return true
     } catch (error) {
       if (previous !== null) setStatus(previous)
-      setToast({ tone: 'err', text: `保存失败：${error instanceof Error ? error.message : String(error)}` })
+      setToast({ tone: 'err', text: t('panel.saveFailed', { v0: error instanceof Error ? error.message : String(error) }) })
       return false
     } finally {
       setBusy('')
@@ -919,12 +925,12 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const saveKey = useCallback(async (): Promise<void> => {
     const value = keyDraft.trim()
     if (value.length < 10) {
-      setToast({ tone: 'err', text: 'API Key 至少 10 个字符。' })
+      setToast({ tone: 'err', text: t('panel.apiKeyMustContainAtLeast10') })
       return
     }
     const ok = await applyPatch('key', { apiKey: value }, { keyConfigured: true, keySource: 'config' })
     if (ok) {
-      // 输入栏不清空：以脱敏掩码回填并锁定，用户明确看到「配的是哪把钥匙」。
+      // Show the masked key after saving so users can identify which key is configured.
       setKeyMask(maskKey(value))
       setKeyDraft('')
       setKeyLocked(true)
@@ -932,7 +938,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     }
   }, [keyDraft, applyPatch])
 
-  /** 连接测试：有未保存的草稿 key 先测草稿，否则测已配置的。 */
+  /** Test an unsaved draft key first, otherwise use the configured key. */
   const runPing = useCallback(async (): Promise<void> => {
     setPingBusy(true)
     setPingResult(null)
@@ -954,7 +960,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const saveEndpoint = useCallback(async (): Promise<void> => {
     const value = endpointDraft.trim()
     if (value.length === 0) {
-      setToast({ tone: 'err', text: '端点不能为空。' })
+      setToast({ tone: 'err', text: t('panel.endpointCannotBeEmpty') })
       return
     }
     const ok = await applyPatch('endpoint', { endpoint: value })
@@ -965,25 +971,25 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     setCalibBusy(true)
     setToast(null)
     try {
-      setCalib(await getJson('/calibration') as Calibration)
+      setCalib(await getJson(`/calibration?locale=${getLocale()}`) as Calibration)
     } catch (error) {
-      setToast({ tone: 'err', text: `校准失败：${error instanceof Error ? error.message : String(error)}` })
+      setToast({ tone: 'err', text: t('panel.calibrationFailed', { v0: error instanceof Error ? error.message : String(error) }) })
     } finally {
       setCalibBusy(false)
     }
   }, [])
 
-  /** 一键应用单条校准建议：PUT 阈值（热生效），成功后重新生成报告看采纳标记。 */
+  /** Apply one threshold immediately, then regenerate advice to show adoption. */
   const applyAdvice = useCallback(async (param: string, suggested: number): Promise<void> => {
     setToast(null)
-    // 入口即置忙：PUT 往返期间禁用所有应用/生成按钮（防双击重复 PUT 与并发报告）。
+    // Disable Apply and Generate throughout the request to prevent duplicate writes.
     setCalibBusy(true)
     try {
       await putConfig({ [param]: suggested })
-      setToast({ tone: 'ok', text: `已应用 ${param} → ${suggested.toFixed(2)}（下一个调用即生效）` })
+      setToast({ tone: 'ok', text: t('panel.appliedEffectiveOnTheNextCall', { v0: param, v1: suggested.toFixed(2) }) })
       await runCalibration()
     } catch (error) {
-      setToast({ tone: 'err', text: `应用失败：${error instanceof Error ? error.message : String(error)}` })
+      setToast({ tone: 'err', text: t('panel.applyFailed', { v0: error instanceof Error ? error.message : String(error) }) })
     } finally {
       setCalibBusy(false)
     }
@@ -1003,16 +1009,17 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       setStatus({ ...status, preapproveAllowlist: next })
       setToast({
         tone: 'ok',
-        text: add ? `已把 ${tool} 加入预批准名单（下一个审批请求即生效）` : `已把 ${tool} 移出预批准名单`,
+        text: add ? t('panel.allowlistAddedToast', { v0: tool }) : t('panel.allowlistRemovedToast', { v0: tool }),
       })
     } catch (error) {
-      setToast({ tone: 'err', text: `名单更新失败：${error instanceof Error ? error.message : String(error)}` })
+      setToast({ tone: 'err', text: t('panel.allowlistUpdateFailed', { v0: error instanceof Error ? error.message : String(error) }), })
     } finally {
       setBusy('')
     }
   }, [status])
 
   /** 跨环节汇总：总数 / 自动批准 / 转人工 / 拒绝 / 降级。 */
+  /** Aggregate calls, automatic approvals, reviews, denials, and fallbacks across stages. */
   const aggregate = useMemo(() => {
     const result = { calls: 0, auto: 0, ask: 0, deny: 0, delegate: 0, degraded: 0 }
     for (const summary of stats) {
@@ -1043,7 +1050,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         || (entry.detail ?? '').toLowerCase().includes(needle)))
   }, [log, filterAction, filterMode, query])
 
-  /** 每页条数：20 条保证一屏内完整可见（表格 + 分页栏不依赖滚动）。 */
+  /** Twenty rows keep the table and pagination controls within one viewport. */
   const LOG_PAGE_SIZE = 20
   const totalPages = Math.max(1, Math.ceil(filteredLog.length / LOG_PAGE_SIZE))
   const safePage = Math.min(Math.max(1, logPage), totalPages)
@@ -1052,10 +1059,10 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     [filteredLog, safePage],
   )
 
-  /** 筛选变化回第 1 页（避免停在一个不存在的高页码上看空表）。 */
+  /** Reset to page one when filters change to avoid an empty out-of-range page. */
   useEffect(() => { setLogPage(1) }, [filterAction, filterMode, query])
 
-  /** 翻页：切页并把 tab 内容区滚回顶部（新页内容从表格第一行开始看）。 */
+  /** Change page and scroll the tab body back to the first row. */
   const gotoPage = useCallback((page: number): void => {
     setLogPage(Math.min(Math.max(1, page), totalPages))
     setPageJump('')
@@ -1096,20 +1103,20 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       <section className="jev-card">
         <header className="jev-card-head">
           <div>
-            <div className="jev-card-title">快速开始</div>
-            <div className="jev-card-sub">三步跑通：配 Key → 开观察 → 数字健康后切执行</div>
+            <div className="jev-card-title">{t('panel.quickStart')}</div>
+            <div className="jev-card-sub">{t('panel.quickStartSub')}</div>
           </div>
         </header>
         <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {step(keyReady, '1', '配置 API Key（设置 tab，可先测试连接）',
-            <button className="jev-btn" onClick={() => { setTab('settings') }}>去配置</button>)}
-          {step(status.enabled, '2', '启用插件（观察模式只记录，不影响任何行为）',
-            <button className="jev-btn jev-btn--primary" disabled={busy !== ''} onClick={() => { void applyPatch('enabled', { enabled: true }, { enabled: true }) }}>启用</button>)}
+          {step(keyReady, '1', t('panel.stepConfigureKey'),
+            <button className="jev-btn" onClick={() => { setTab('settings') }}>{t('panel.goConfigure')}</button>)}
+          {step(status.enabled, '2', t('panel.stepEnablePlugin'),
+            <button className="jev-btn jev-btn--primary" disabled={busy !== ''} onClick={() => { void applyPatch('enabled', { enabled: true }, { enabled: true }) }}>{t('panel.enable')}</button>)}
           {step(enforced, '3', readiness !== null && readiness.ready
-            ? '影子数据健康，建议切到执行模式'
-            : readiness !== null ? readiness.reason : '观察一段时间后评估是否切执行',
+            ? t('panel.readinessHealthy')
+            : readiness !== null ? readiness.reason : t('panel.readinessAssessLater'),
             status.mode === 'shadow' && readiness?.ready === true
-              ? <button className="jev-btn jev-btn--primary" disabled={busy !== ''} onClick={() => { void applyPatch('mode', { mode: 'enforce' }, { mode: 'enforce' }) }}>切执行</button>
+              ? <button className="jev-btn jev-btn--primary" disabled={busy !== ''} onClick={() => { void applyPatch('mode', { mode: 'enforce' }, { mode: 'enforce' }) }}>{t('panel.switchToEnforce')}</button>
               : undefined)}
         </ol>
       </section>
@@ -1123,11 +1130,11 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         <Fragment>
           {onboarding}
           <div className="jev-empty">
-            <b>还没有决策记录</b>
+            <b>{t('panel.noDecisionsYet')}</b>
             <div>
             {status !== null && status.enabled
-              ? '已启用：下一次工具调用或 @ 引用就会留下第一条判断。'
-              : '启用后，每次工具调用都会先过一遍 Jev，并在「决策记录」里留痕。'}
+              ? t('panel.enabledTheNextToolCallOrReference')
+              : t('panel.onceEnabledJevEvaluatesEachToolCall')}
           </div>
           <div className="jev-row-actions">
             {status !== null && !status.enabled
@@ -1136,11 +1143,11 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                   className="jev-btn jev-btn--primary"
                   disabled={busy !== ''}
                   onClick={() => { void applyPatch('enabled', { enabled: true }, { enabled: true }) }}
-                >启用 Jev</button>
+                >{t('panel.enableJev')}</button>
               )
               : null}
             {keySource === 'none' && (
-              <button className="jev-btn" onClick={() => { setTab('settings') }}>先配置 API Key</button>
+              <button className="jev-btn" onClick={() => { setTab('settings') }}>{t('panel.configureApiKeyFirst')}</button>
             )}
           </div>
         </div>
@@ -1154,11 +1161,11 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
           <section className="jev-card">
             <header className="jev-card-head">
               <div>
-                <div className="jev-card-title">净收益</div>
+                <div className="jev-card-title">{t('panel.netBenefit')}</div>
                 <div className="jev-card-sub">
-                  {`最近 ${fmtNum(impact.windowSize)} 条 · enforce 期口径 · ${impact.firstTs !== undefined ? impact.firstTs.slice(0, 10) : '—'} 起`
+                  {t('panel.latestRecordsEnforceMetricsFrom', { v0: fmtNum(impact.windowSize), v1: impact.firstTs !== undefined ? impact.firstTs.slice(0, 10) : '—' })
                     + `${impact.lastTs !== undefined ? ` ~ ${impact.lastTs.slice(0, 10)}` : ''}`
-                    + ` · ${String(impact.days)} 个活跃日 ${String(impact.sessions)} 个会话`}
+                    + t('panel.activeDaysSessions', { v0: String(impact.days), v1: String(impact.sessions) })}
                 </div>
               </div>
               <div className="jev-card-metrics">
@@ -1167,17 +1174,17 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
               </div>
             </header>
             <div className="jev-chips">
-              <Badge tone="ok">{`省点击 ${fmtNum(impact.enforce.autoApproved)} 次`}</Badge>
-              <Badge tone="err">{`拦截 ${fmtNum(impact.enforce.denied)} 次`}</Badge>
+              <Badge tone="ok">{t('panel.confirmationsSaved', { v0: fmtNum(impact.enforce.autoApproved) })}</Badge>
+              <Badge tone="err">{t('panel.blocked', { v0: fmtNum(impact.enforce.denied) })}</Badge>
               {impact.enforce.stagnationAlerts > 0
-                ? <Badge tone="warn">{`停滞提醒 ${fmtNum(impact.enforce.stagnationAlerts)} 次`}</Badge>
+                ? <Badge tone="warn">{t('panel.stagnationAlerts', { v0: fmtNum(impact.enforce.stagnationAlerts) })}</Badge>
                 : null}
               {misApprovalBadge(impact)}
               {(impact.agreement.enforce['friction-human-approved'] ?? 0) > 0
-                ? <Badge tone="warn">{`多余人工 ${fmtNum(impact.agreement.enforce['friction-human-approved'] ?? 0)}`}</Badge>
+                ? <Badge tone="warn">{t('panel.extraHumanReviews', { v0: fmtNum(impact.agreement.enforce['friction-human-approved'] ?? 0) })}</Badge>
                 : null}
               {(impact.agreement.shadow['would-over-approve'] ?? 0) > 0
-                ? <Badge tone="muted">{`shadow 对照·会批人拒 ${fmtNum(impact.agreement.shadow['would-over-approve'] ?? 0)}`}</Badge>
+                ? <Badge tone="muted">{t('panel.shadowComparisonWouldApproveHumanRejected', { v0: fmtNum(impact.agreement.shadow['would-over-approve'] ?? 0) })}</Badge>
                 : null}
             </div>
             <p className="jev-note">{oneLineSummary(impact)}</p>
@@ -1189,14 +1196,19 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
           <ToolTopCard log={log} />
         </div>
         <p className="jev-note" style={{ marginTop: -4 }}>
-          {`统计窗口：最近 ${fmtNum(log.length)} 条决策${log.length > 0 && log.at(-1) !== undefined ? `（${log.at(-1)!.ts.slice(0, 10)} ~ ${log[0]!.ts.slice(0, 10)}）` : ''}；面板上限 500 条，更早用 /jev-log 查看。`}
+          {t('panel.statsWindowCaption', {
+            v0: fmtNum(log.length),
+            v1: log.length > 0 && log.at(-1) !== undefined
+              ? t('panel.statsWindowRange', { v0: log.at(-1)!.ts.slice(0, 10), v1: log[0]!.ts.slice(0, 10) })
+              : '',
+          })}
         </p>
         <section className="jev-card">
           <header className="jev-card-head">
             <div>
-              <div className="jev-card-title">最近决策</div>
+              <div className="jev-card-title">{t('panel.recentDecisions')}</div>
               <div className="jev-card-sub">
-                {recent.length === 0 ? '暂无记录' : `最新 ${String(recent.length)} 条，按时间倒序`}
+                {recent.length === 0 ? t('panel.noRecordsYet') : t('panel.latestNewestFirst', { v0: String(recent.length) })}
               </div>
             </div>
             <button
@@ -1204,10 +1216,10 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
               style={{ marginLeft: 'auto' }}
               disabled={log.length === 0}
               onClick={() => { setTab('log') }}
-            >{`查看全部${log.length > 0 ? `（${String(log.length)}）` : ''}`}</button>
+            >{t('panel.viewAll', { v0: log.length > 0 ? ` (${String(log.length)})` : '' })}</button>
           </header>
           {recent.length === 0
-            ? <p className="jev-note">启用后这里会出现最近几条判断。</p>
+            ? <p className="jev-note">{t('panel.recentDecisionsWillAppearHereOnceEnabled')}</p>
             : <ul className="jev-mini">{recent.map((entry, index) => <MiniRow key={entryKey(entry, index)} entry={entry} />)}</ul>}
         </section>
       </Fragment>
@@ -1223,7 +1235,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
               className="jev-chip"
               data-on={filterAction === 'all' ? '1' : '0'}
               onClick={() => { setFilterAction('all') }}
-            >全部<b>{fmtNum(log.length)}</b></button>
+            >{t('panel.all')}<b>{fmtNum(log.length)}</b></button>
             {filterChips.map(action => (
               <button
                 key={action}
@@ -1236,51 +1248,51 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
           <input
             className="jev-search"
             type="search"
-            placeholder="搜索工具名或详情…"
+            placeholder={t('panel.searchToolNamesOrDetails')}
             value={query}
             onChange={event => { setQuery(event.target.value) }}
           />
           <Segmented
-            label="按生效模式筛选"
+            label={t('panel.filterByDecisionMode')}
             value={filterMode}
             options={[
-              { value: 'all', label: '全部' },
-              { value: 'shadow', label: '观察' },
-              { value: 'enforce', label: '执行' },
+              { value: 'all', label: t('panel.all') },
+              { value: 'shadow', label: t('panel.shadow') },
+              { value: 'enforce', label: t('panel.enforce') },
             ]}
             onChange={setFilterMode}
           />
           {activeFilters
-            ? <button className="jev-btn" onClick={resetFilters}>清除筛选</button>
+            ? <button className="jev-btn" onClick={resetFilters}>{t('panel.clearFilters')}</button>
             : null}
         </div>
         {log.length === 0
           ? (
             <div className="jev-empty">
-              <b>还没有决策记录</b>
-              <div>启用 Jev 之后，每次工具调用与 @ 引用都会在这里留一条。</div>
+              <b>{t('panel.noDecisionsYet')}</b>
+              <div>{t('panel.onceJevIsEnabledEachToolCall')}</div>
             </div>
           )
           : rows.length === 0
             ? (
               <div className="jev-empty">
-                <b>没有匹配的决策</b>
-                <div>换个筛选条件或清空搜索词。</div>
+                <b>{t('panel.noMatchingDecisions')}</b>
+                <div>{t('panel.tryDifferentFiltersOrClearTheSearch')}</div>
                 <div className="jev-row-actions">
-                  <button className="jev-btn" onClick={resetFilters}>清除筛选</button>
+                  <button className="jev-btn" onClick={resetFilters}>{t('panel.clearFilters')}</button>
                 </div>
               </div>
             )
             : (
               <div className="jev-table">
                 <div className="jev-thead">
-                  <span>时间</span>
-                  <span className="jev-col-tag">环节</span>
-                  <span className="jev-col-tool">工具</span>
-                  <span>动作</span>
-                  <span className="jev-col-lat">延迟</span>
-                  <span className="jev-col-mode">模式</span>
-                  <span>详情</span>
+                  <span>{t('panel.time')}</span>
+                  <span className="jev-col-tag">{t('panel.stage')}</span>
+                  <span className="jev-col-tool">{t('panel.tool')}</span>
+                  <span>{t('panel.action')}</span>
+                  <span className="jev-col-lat">{t('panel.latency')}</span>
+                  <span className="jev-col-mode">{t('panel.mode')}</span>
+                  <span>{t('panel.details')}</span>
                 </div>
                 {rows.map((entry, index) => {
                   const key = entryKey(entry, index)
@@ -1295,7 +1307,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                 })}
               </div>
             )}
-        {/* 分页导航吸在视口底部：翻页无需滚动找按钮（不用负边距铺满，避免横向溢出）。 */}
+        {/* Keep pagination visible at the bottom without negative margins or horizontal overflow. */}
         <div className="jev-toolbar" style={{
           justifyContent: 'center',
           position: 'sticky',
@@ -1307,16 +1319,15 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
           paddingTop: 8,
           paddingBottom: 8,
         }}>
-          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(1) }}>首页</button>
-          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(safePage - 1) }}>← 上一页</button>
+          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(1) }}>{t('panel.first')}</button>
+          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(safePage - 1) }}>{t('panel.previous')}</button>
           <span className="jev-note" style={{ whiteSpace: 'nowrap' }}>
-            {`第 ${String(safePage)} / ${String(totalPages)} 页 · 本页 ${fmtNum(rows.length)} 条（共 ${fmtNum(filteredLog.length)} 条）`}
+            {t('panel.pageRecordsOnThisPageTotal', { v0: String(safePage), v1: String(totalPages), v2: fmtNum(rows.length), v3: fmtNum(filteredLog.length) })}
           </span>
-          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(safePage + 1) }}>下一页 →</button>
-          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(totalPages) }}>末页</button>
+          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(safePage + 1) }}>{t('panel.next')}</button>
+          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(totalPages) }}>{t('panel.last')}</button>
           <span className="jev-note" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            跳至
-            <input
+            {t('panel.goTo')}<input
               className="jev-search"
               style={{ width: 64, flex: 'none', textAlign: 'center' }}
               type="number"
@@ -1331,11 +1342,10 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                 if (Number.isFinite(target)) gotoPage(target)
               }}
             />
-            页
-          </span>
+            {t('panel.page')}</span>
         </div>
         <p className="jev-note">
-          {`已载入最近 ${fmtNum(log.length)} 条（面板上限 500）；点一行展开完整字段，更早记录用 /jev-log 500 --json。`}
+          {t('panel.loadedTheLatestRecordsPanelLimit500', { v0: fmtNum(log.length) })}
         </p>
       </Fragment>
     )
@@ -1347,68 +1357,68 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         <section className="jev-card" style={{ gridColumn: '1/-1' }}>
           <header className="jev-card-head">
             <div>
-              <div className="jev-card-title">阈值校准建议</div>
-              <div className="jev-card-sub">读影子遥测的决策分布与一致率，给阈值调整方向；不自动应用</div>
+              <div className="jev-card-title">{t('panel.thresholdCalibrationAdvice')}</div>
+              <div className="jev-card-sub">{t('panel.suggestThresholdChangesFromShadowTelemetryAnd')}</div>
             </div>
             <button
               className="jev-btn jev-btn--primary"
               style={{ marginLeft: 'auto' }}
               disabled={calibBusy}
               onClick={() => { void runCalibration() }}
-            >{calibBusy ? '分析中…' : '生成建议'}</button>
+            >{calibBusy ? t('panel.analyzing') : t('panel.generateAdvice')}</button>
           </header>
           {calib === null
             ? (
               <div className="jev-empty">
-                <b>还没有生成报告</b>
-                <div>先生成一次，看看当前阈值是否值得调整。</div>
+                <b>{t('panel.noReportYet')}</b>
+                <div>{t('panel.generateAReportToSeeWhetherThresholds')}</div>
               </div>
             )
             : (
               <Fragment>
                 <div className="jev-chips">
-                  <Badge tone="brand">{`窗口 ${fmtNum(calib.windowSize)} 条`}</Badge>
-                  <Badge tone="muted">{`守门人 ${fmtNum(calib.counts.guard)}`}</Badge>
-                  <Badge tone="muted">{`预批准 ${fmtNum(calib.counts.preapprove)}`}</Badge>
-                  <Badge tone="muted">{`一致率 ${fmtNum(calib.counts.approvalLoop)}`}</Badge>
-                  <Badge tone="muted">{`观察 ${fmtNum(calib.modeSplit.shadow)} · 执行 ${fmtNum(calib.modeSplit.enforce)}`}</Badge>
+                  <Badge tone="brand">{t('panel.windowRecords', { v0: fmtNum(calib.windowSize) })}</Badge>
+                  <Badge tone="muted">{t('panel.guard2', { v0: fmtNum(calib.counts.guard) })}</Badge>
+                  <Badge tone="muted">{t('panel.preapproval2', { v0: fmtNum(calib.counts.preapprove) })}</Badge>
+                  <Badge tone="muted">{t('panel.agreement2', { v0: fmtNum(calib.counts.approvalLoop) })}</Badge>
+                  <Badge tone="muted">{t('panel.shadowEnforce', { v0: fmtNum(calib.modeSplit.shadow), v1: fmtNum(calib.modeSplit.enforce) })}</Badge>
                   {calib.history === undefined ? null : (
                     <Badge tone={calib.history.adopted > 0 ? 'ok' : 'muted'}>
-                      {`上次 ${calib.history.previousTs.slice(5, 10)}：采纳 ${String(calib.history.adopted)} / 未采纳 ${String(calib.history.ignored)}`
-                        + (calib.history.manual !== undefined && calib.history.manual > 0 ? ` / 手调 ${String(calib.history.manual)}` : '')}
+                      {t('panel.previousAdoptedIgnored', { v0: calib.history.previousTs.slice(5, 10), v1: String(calib.history.adopted), v2: String(calib.history.ignored) })
+                        + (calib.history.manual !== undefined && calib.history.manual > 0 ? t('panel.manual', { v0: String(calib.history.manual) }) : '')}
                     </Badge>
                   )}
                 </div>
                 {calib.allowlistSuggestions !== undefined && calib.allowlistSuggestions.length > 0 && (
                   <div>
                     <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>
-                      预批准候选（影子数据：全部低风险、高置信、低不可逆、无注入嫌疑）
+                      {t('panel.allowlistSuggestionsTitle')}
                     </div>
                     {calib.allowlistSuggestions.map(s => (
                       <div key={s.tool} className="jev-advice">
                         <div className="jev-advice-head">
                           <span className="jev-param" style={{ color: TONE.ok }}>{s.tool}</span>
-                          <Badge tone="muted">{`样本 ${String(s.samples)}`}</Badge>
-                          <Badge tone="muted">{`平均置信 ${s.avgConfidence.toFixed(2)}`}</Badge>
-                          <Badge tone="muted">{`平均不可逆 ${s.avgIrreversibility.toFixed(2)}`}</Badge>
+                          <Badge tone="muted">{t('panel.samples', { v0: String(s.samples) })}</Badge>
+                          <Badge tone="muted">{t('panel.avgConfidence', { v0: s.avgConfidence.toFixed(2) })}</Badge>
+                          <Badge tone="muted">{t('panel.avgIrreversibility', { v0: s.avgIrreversibility.toFixed(2) })}</Badge>
                           <button
                             className="jev-btn jev-btn--primary"
                             style={{ marginLeft: 'auto' }}
                             disabled={busy !== ''}
-                            title="加入预批准名单并立即生效；自动批仍受双 noul 证据门约束"
+                            title={t('panel.addToAllowlistTitle')}
                             onClick={() => { void applyAllowlist(s.tool, true) }}
-                          >加入名单</button>
+                          >{t('panel.addToAllowlist')}</button>
                         </div>
                       </div>
                     ))}
-                    <p className="jev-note">候选只统计「全部调用均为低风险」的工具；加入后每次自动批仍单独过证据门，一致率遥测持续监督。</p>
+                    <p className="jev-note">{t('panel.allowlistSuggestionsNote')}</p>
                   </div>
                 )}
                 {calib.advice.length === 0
                   ? (
                     <div className="jev-empty">
-                      <b>当前无需调整阈值</b>
-                      <div>遥测分布与现配置一致（或上次建议已全部应用）。有新的调整建议时，每条建议卡右上角会出现「应用」按钮。</div>
+                      <b>{t('panel.noThresholdChangesNeeded')}</b>
+                      <div>{t('panel.telemetryMatchesTheCurrentConfigurationOrAll')}</div>
                     </div>
                   )
                   : calib.advice.map(advice => (
@@ -1419,14 +1429,14 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                           {advice.current.toFixed(2)}<i> → </i>{advice.suggested.toFixed(2)}
                           {` ${advice.suggested > advice.current ? '↑' : '↓'}`}
                         </span>
-                        <Badge tone="muted">{`样本 ${fmtNum(advice.samples)}`}</Badge>
+                        <Badge tone="muted">{t('panel.samples', { v0: fmtNum(advice.samples) })}</Badge>
                         <button
                           className="jev-btn jev-btn--primary"
                           style={{ marginLeft: 'auto' }}
                           disabled={calibBusy}
-                          title="写入该阈值并立即生效（不重启）；持久化取决于设置服务"
+                          title={t('panel.applyThisThresholdImmediatelyWithoutRestartingPersistence')}
                           onClick={() => { void applyAdvice(advice.param, advice.suggested) }}
-                        >应用</button>
+                        >{t('panel.apply')}</button>
                       </div>
                       <p className="jev-note">{advice.basis}</p>
                       {(advice.note ?? '').length === 0 ? null : <p className="jev-note">{advice.note}</p>}
@@ -1434,17 +1444,17 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                   ))}
                 {calib.insufficient.length === 0 ? null : (
                   <div>
-                    <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>样本不足</div>
-                    <p className="jev-note">{calib.insufficient.map(note => note.reason).join('；')}</p>
+                    <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>{t('panel.insufficientSamples')}</div>
+                    <p className="jev-note">{calib.insufficient.map(note => note.reason).join('; ')}</p>
                   </div>
                 )}
                 {calib.observations.length === 0 ? null : (
                   <div>
-                    <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>观察项</div>
-                    <p className="jev-note">{calib.observations.map(note => note.reason).join('；')}</p>
+                    <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>{t('panel.observations')}</div>
+                    <p className="jev-note">{calib.observations.map(note => note.reason).join('; ')}</p>
                   </div>
                 )}
-                <p className="jev-note">「应用」写入阈值并立即生效（无需重启）；持久化取决于设置服务是否落盘。</p>
+                <p className="jev-note">{t('panel.applyChangesTheThresholdImmediatelyWithoutRestarting')}</p>
               </Fragment>
             )}
         </section>
@@ -1458,12 +1468,12 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         <section className="jev-card">
           <header className="jev-card-head">
             <div>
-              <div className="jev-card-title">连接</div>
-              <div className="jev-card-sub">Provider 决定请求发往哪里；切换立即生效</div>
+              <div className="jev-card-title">{t('panel.connection')}</div>
+              <div className="jev-card-sub">{t('panel.providerControlsTheRequestDestinationChangesTake')}</div>
             </div>
           </header>
           <div className="jev-provider">
-            {PROVIDERS.map(item => (
+            {providers().map(item => (
               <button
                 key={item.id}
                 type="button"
@@ -1498,24 +1508,24 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                     className="jev-btn"
                     disabled={busy !== '' || endpointDraft.trim().length === 0}
                     onClick={() => { void saveEndpoint() }}
-                  >{busy === 'endpoint' ? '…' : '保存'}</button>
+                  >{busy === 'endpoint' ? '…' : t('panel.save')}</button>
                 </div>
-                <p className="jev-note">留空则沿用配置里的 endpoint。</p>
+                <p className="jev-note">{t('panel.leaveEmptyToUseTheConfiguredEndpoint')}</p>
               </div>
             )
-            : <p className="jev-note">端点由 Provider 预置；选「自定义」可覆盖。</p>}
+            : <p className="jev-note">{t('panel.theProviderSuppliesADefaultEndpointChoose')}</p>}
         </section>
 
         <section className="jev-card">
           <header className="jev-card-head">
             <div>
               <div className="jev-card-title">API Key</div>
-              <div className="jev-card-sub">{`来源：${KEY_SOURCE[keySource] ?? keySource}`}</div>
+              <div className="jev-card-sub">{t('panel.source', { v0: keySources()[keySource] ?? keySource })}</div>
             </div>
           </header>
           <div className="jev-field">
             <label className="jev-field-label">
-              {keyLocked ? '当前使用的 Key（已脱敏）' : keySource === 'none' ? '粘贴你的 Jev API Key' : '覆盖已有 Key'}
+              {keyLocked ? t('panel.currentKeyMasked') : keySource === 'none' ? t('panel.pasteYourJevApiKey') : t('panel.overrideExistingKey')}
             </label>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {keyLocked ? (
@@ -1530,16 +1540,16 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                   <button
                     className="jev-btn"
                     disabled={busy !== ''}
-                    title="清空输入框，粘贴新 Key"
+                    title={t('panel.clearTheFieldAndPasteANew')}
                     onClick={() => { setKeyLocked(false); setKeyMask('') }}
-                  >更换</button>
+                  >{t('panel.replace')}</button>
                 </Fragment>
               ) : (
                 <Fragment>
                   <input
                     className="jev-input"
                     type={showKey ? 'text' : 'password'}
-                    placeholder={keySource === 'none' ? '至少 10 个字符' : '输入新值以覆盖'}
+                    placeholder={keySource === 'none' ? t('panel.atLeast10Characters') : t('panel.enterANewValueToOverride')}
                     value={keyDraft}
                     onChange={event => { setKeyDraft(event.target.value) }}
                     onKeyDown={event => {
@@ -1551,20 +1561,20 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                     className="jev-btn"
                     disabled={keyDraft.length === 0}
                     onClick={() => { setShowKey(!showKey) }}
-                  >{showKey ? '隐藏' : '显示'}</button>
+                  >{showKey ? t('panel.hide') : t('panel.show')}</button>
                   <button
                     className="jev-btn jev-btn--primary"
                     disabled={busy !== '' || keyDraft.trim().length < 10}
                     onClick={() => { void saveKey() }}
-                  >{busy === 'key' ? '…' : '保存'}</button>
+                  >{busy === 'key' ? '…' : t('panel.save')}</button>
                 </Fragment>
               )}
               <button
                 className="jev-btn"
                 disabled={pingBusy || (!keyLocked && keyDraft.trim().length < 10 && keySource === 'none')}
-                title="向 Provider 发一次最小真实请求，验证 Key 与端点（约 $0.00001）"
+                title={t('panel.sendAMinimalRealRequestToThe')}
                 onClick={() => { void runPing() }}
-              >{pingBusy ? '测试中…' : '测试连接'}</button>
+              >{pingBusy ? t('panel.testing') : t('panel.testConnection')}</button>
             </div>
             {pingResult !== null && (
               <p className="jev-note" style={{ color: pingResult.ok ? TONE.ok : TONE.err }}>
@@ -1572,52 +1582,52 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
               </p>
             )}
           </div>
-          <p className="jev-note">Key 只写入本机配置，保存后以脱敏形式显示；「测试连接」会先测未保存的草稿 Key，再测已配置的。</p>
+          <p className="jev-note">{t('panel.theKeyIsSavedOnlyToLocal')}</p>
         </section>
 
         <section className="jev-card">
           <header className="jev-card-head">
             <div>
-              <div className="jev-card-title">生效中的能力</div>
-              <div className="jev-card-sub">其余开关在 cordis.yml / 设置面板调整</div>
+              <div className="jev-card-title">{t('panel.activeCapabilities')}</div>
+              <div className="jev-card-sub">{t('panel.adjustOtherSwitchesInCordisYmlOr')}</div>
             </div>
           </header>
           <div className="jev-chips">
-            <Badge tone={status?.guardEnabled === true ? 'ok' : 'muted'}>{`守门人 ${status?.guardEnabled === true ? '开' : '关'}`}</Badge>
-            <Badge tone={status?.preapproveEnabled === true ? 'ok' : 'muted'}>{`预批准 ${status?.preapproveEnabled === true ? '开' : '关'}`}</Badge>
-            <Badge tone={status?.stagnationEnabled === true ? 'ok' : 'muted'}>{`停滞检测 ${status?.stagnationEnabled === true ? '开' : '关'}`}</Badge>
-            <Badge tone={status?.enabled === true ? 'ok' : 'muted'}>{`总开关 ${status?.enabled === true ? '开' : '关'}`}</Badge>
+            <Badge tone={status?.guardEnabled === true ? 'ok' : 'muted'}>{t('panel.guard2', { v0: status?.guardEnabled === true ? t('panel.on') : t('panel.off') })}</Badge>
+            <Badge tone={status?.preapproveEnabled === true ? 'ok' : 'muted'}>{t('panel.preapproval2', { v0: status?.preapproveEnabled === true ? t('panel.on') : t('panel.off') })}</Badge>
+            <Badge tone={status?.stagnationEnabled === true ? 'ok' : 'muted'}>{t('panel.stagnationDetection2', { v0: status?.stagnationEnabled === true ? t('panel.on') : t('panel.off') })}</Badge>
+            <Badge tone={status?.enabled === true ? 'ok' : 'muted'}>{t('panel.masterSwitch', { v0: status?.enabled === true ? t('panel.on') : t('panel.off') })}</Badge>
           </div>
           <div className="jev-field">
-            <label className="jev-field-label">模式</label>
+            <label className="jev-field-label">{t('panel.mode')}</label>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <Segmented
-                label="决策模式"
+                label={t('panel.decisionMode')}
                 value={mode}
                 disabled={busy !== ''}
                 options={[
-                  { value: 'shadow', label: '观察', title: MODE_HINT.shadow },
-                  { value: 'enforce', label: '执行', title: MODE_HINT.enforce },
+                  { value: 'shadow', label: t('panel.shadow'), title: modeHints().shadow },
+                  { value: 'enforce', label: t('panel.enforce'), title: modeHints().enforce },
                 ]}
                 onChange={next => { void applyPatch('mode', { mode: next }, { mode: next as JevStatus['mode'] }) }}
               />
-              <span className="jev-note">{MODE_HINT[mode]}</span>
+              <span className="jev-note">{modeHints()[mode]}</span>
             </div>
           </div>
-          <p className="jev-note">切到执行前，建议先观察一段时间，确认拒绝与转人工的判断符合预期。</p>
+          <p className="jev-note">{t('panel.beforeSwitchingToEnforceModeObserveDecisions')}</p>
         </section>
 
         <section className="jev-card">
           <header className="jev-card-head">
             <div>
-              <div className="jev-card-title">预批准名单</div>
+              <div className="jev-card-title">{t('panel.preapprovalAllowlist')}</div>
               <div className="jev-card-sub">
-                {`名单内的工具，审批请求会经 Jev 双重判断（授权范围 + 可逆）后自动放行；当前 ${String((status?.preapproveAllowlist ?? []).length)} 个`}
+                {t('panel.preapprovalAllowlistSub', { v0: String((status?.preapproveAllowlist ?? []).length) })}
               </div>
             </div>
           </header>
           {(status?.preapproveAllowlist ?? []).length === 0 ? (
-            <p className="jev-note">名单为空——预批准不会自动批任何工具（这就是「省点击」还没发生的原因）。去「阈值校准」tab 生成建议，影子数据会推荐可信工具。</p>
+            <p className="jev-note">{t('panel.preapprovalAllowlistEmpty')}</p>
           ) : (
             <div className="jev-chips">
               {(status?.preapproveAllowlist ?? []).map(tool => (
@@ -1626,21 +1636,21 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                   className="jev-chip"
                   data-on="1"
                   disabled={busy !== ''}
-                  title="点击移出预批准名单（立即生效）"
+                  title={t('panel.removeFromAllowlistTitle')}
                   onClick={() => { void applyAllowlist(tool, false) }}
                 >{tool} ✕</button>
               ))}
             </div>
           )}
-          <p className="jev-note">自动批仍受证据门约束：Jev 会核对参数证据与授权范围，任何怀疑都转人工。</p>
+          <p className="jev-note">{t('panel.preapprovalEvidenceNote')}</p>
         </section>
 
         <section className="jev-card">
           <header className="jev-card-head">
             <div>
-              <div className="jev-card-title">刷新</div>
+              <div className="jev-card-title">{t('panel.refresh')}</div>
               <div className="jev-card-sub">
-                {updatedAt > 0 ? `上次更新 ${clockOf(new Date(updatedAt).toISOString())}` : '尚未刷新'}
+                {updatedAt > 0 ? t('panel.lastUpdated', { v0: clockOf(new Date(updatedAt).toISOString()) }) : t('panel.notRefreshedYet')}
               </div>
             </div>
           </header>
@@ -1651,58 +1661,73 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                 checked={autoRefresh}
                 onChange={event => { setAutoRefresh(event.target.checked) }}
               />
-              {`每 ${String(REFRESH_MS / 1000)} 秒自动刷新`}
+              {t('panel.autoRefreshEverySeconds', { v0: String(REFRESH_MS / 1000) })}
             </label>
             <button
               className="jev-btn"
               disabled={loading}
               onClick={() => { void load(false) }}
-            >{loading ? '刷新中…' : '立即刷新'}</button>
+            >{loading ? t('panel.refreshing') : t('panel.refreshNow')}</button>
           </div>
-          <p className="jev-note">页面不可见时自动暂停，不产生后台请求。</p>
+          <p className="jev-note">{t('panel.autoRefreshPausesWhileThePageIs')}</p>
         </section>
       </div>
     )
   }
 
   return (
-    <div className="jev-root">
+    <div className="jev-root" lang={locale}>
       <header className="jev-head">
         <div className="jev-logo">⚡</div>
         <div className="jev-headtext">
           <div className="jev-title-row">
-            <h2 className="jev-title">Jev 决策</h2>
+            <h2 className="jev-title">{t('panel.jevDecisions')}</h2>
             {status === null ? null : (
               <span className="jev-status" data-on={status.enabled ? '1' : '0'}>
                 <i className="jev-dot" />
                 {status.enabled
-                  ? status.mode === 'shadow' ? '运行中 · 观察模式' : '运行中 · 执行模式'
-                  : '已停用'}
+                  ? status.mode === 'shadow' ? t('panel.runningShadowMode') : t('panel.runningEnforceMode')
+                  : t('panel.disabled')}
               </span>
             )}
           </div>
           <div className="jev-sub">
             {updatedAt > 0
-              ? `系统一风险判断 · 更新于 ${clockOf(new Date(updatedAt).toISOString())}`
-              : '毫秒级系统一风险判断'}
+              ? t('panel.system1RiskAssessmentUpdated', { v0: clockOf(new Date(updatedAt).toISOString()) })
+              : t('panel.millisecondSystem1RiskAssessment')}
           </div>
         </div>
         <div className="jev-head-actions">
           <button
             className="jev-btn"
             disabled={loading}
-            title="重新拉取状态与最近决策"
+            title={t('panel.reloadStatusAndRecentDecisions')}
             onClick={() => { void load(false) }}
-          >{loading ? '刷新中…' : '刷新'}</button>
+          >{loading ? t('panel.refreshing') : t('panel.refresh')}</button>
+          <button
+            className="jev-btn"
+            type="button"
+            aria-label={locale === 'en' ? '切换到中文' : 'Switch to English'}
+            disabled={calibBusy}
+            onClick={() => {
+              setLocale(locale === 'en' ? 'zh' : 'en')
+              setToast(null)
+              void load(true)
+              if (calib !== null) {
+                setCalib(null)
+                void runCalibration()
+              }
+            }}
+          >{locale === 'en' ? '中文' : 'English'}</button>
           {status === null ? null : (
             <button
               className={status.enabled ? 'jev-btn' : 'jev-btn jev-btn--primary'}
               disabled={busy !== ''}
-              title={status.enabled ? '停用后恢复 dsh 原生行为' : '启用 Jev 决策'}
+              title={status.enabled ? t('panel.disableToRestoreNativeDshBehavior') : t('panel.enableJevDecisions')}
               onClick={() => {
                 void applyPatch('enabled', { enabled: !status.enabled }, { enabled: !status.enabled })
               }}
-            >{busy === 'enabled' ? '…' : status.enabled ? '停用' : '启用'}</button>
+            >{busy === 'enabled' ? '…' : status.enabled ? t('panel.disable') : t('panel.enable')}</button>
           )}
         </div>
       </header>
@@ -1713,34 +1738,34 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       {status === null ? null : (
         <section className="jev-hero">
           <div className="jev-kpis">
-            <Kpi label="决策总数" value={aggregate.calls} hint="统计窗口内的全部判断" />
-            <Kpi label="自动批准" value={aggregate.auto} tone="ok" hint="省掉的人工确认次数" />
-            <Kpi label="转人工" value={aggregate.ask} tone="warn" hint="风险不确定，交回人工" />
-            <Kpi label="拒绝" value={aggregate.deny} tone="err" hint="高置信风险，直接否决" />
-            <Kpi label="降级" value={aggregate.degraded} tone={aggregate.degraded > 0 ? 'warn' : undefined} hint="决策失败，回落原生行为" />
+            <Kpi label={t('panel.totalDecisions')} value={aggregate.calls} hint={t('panel.allAssessmentsInTheStatisticsWindow')} />
+            <Kpi label={t('panel.autoApprove')} value={aggregate.auto} tone="ok" hint={t('panel.humanConfirmationsSaved')} />
+            <Kpi label={t('panel.humanReview')} value={aggregate.ask} tone="warn" hint={t('panel.uncertainRiskReturnedForHumanReview')} />
+            <Kpi label={t('panel.deny')} value={aggregate.deny} tone="err" hint={t('panel.highConfidenceRiskDeniedImmediately')} />
+            <Kpi label={t('panel.fallbacks2')} value={aggregate.degraded} tone={aggregate.degraded > 0 ? 'warn' : undefined} hint={t('panel.decisionFailedRevertedToNativeBehavior')} />
           </div>
           <div className="jev-hero-side">
             <div className="jev-fact">
-              <span>模式</span>
+              <span>{t('panel.mode')}</span>
               <Segmented
-                label="决策模式"
+                label={t('panel.decisionMode')}
                 value={mode}
                 disabled={busy !== ''}
                 options={[
-                  { value: 'shadow', label: '观察', title: MODE_HINT.shadow },
-                  { value: 'enforce', label: '执行', title: MODE_HINT.enforce },
+                  { value: 'shadow', label: t('panel.shadow'), title: modeHints().shadow },
+                  { value: 'enforce', label: t('panel.enforce'), title: modeHints().enforce },
                 ]}
                 onChange={next => { void applyPatch('mode', { mode: next }, { mode: next as JevStatus['mode'] }) }}
               />
             </div>
             <Fact label="Provider">{provider}</Fact>
-            <Fact label="模型">{status.model}</Fact>
-            <Fact label="API Key">{KEY_SOURCE[keySource] ?? keySource}</Fact>
-            <Fact label="今日成本">
+            <Fact label={t('panel.model')}>{status.model}</Fact>
+            <Fact label="API Key">{keySources()[keySource] ?? keySource}</Fact>
+            <Fact label={t('panel.costToday')}>
               {status.costTodayUsd === undefined
                 ? '—'
                 : (status.dailyCostLimitUsd ?? 0) > 0
-                  ? `$${status.costTodayUsd.toFixed(6)} / 限 $${(status.dailyCostLimitUsd ?? 0).toFixed(2)}${status.costTodayUsd >= (status.dailyCostLimitUsd ?? Infinity) ? '（已超限，降级中）' : ''}`
+                  ? t('panel.limit', { v0: status.costTodayUsd.toFixed(6), v1: (status.dailyCostLimitUsd ?? 0).toFixed(2), v2: status.costTodayUsd >= (status.dailyCostLimitUsd ?? Infinity) ? t('panel.limitExceededUsingFallback') : '' })
                   : `$${status.costTodayUsd.toFixed(6)}`}
             </Fact>
           </div>
@@ -1748,12 +1773,12 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       )}
 
       {status === null || !status.enabled || status.mode !== 'shadow' ? null : (
-        <div className="jev-banner">观察模式：决策只记录，不拦截也不放行；确认判断符合预期后再切到执行。</div>
+        <div className="jev-banner">{t('panel.shadowModeDecisionsAreRecordedWithoutBlocking')}</div>
       )}
 
       {status === null ? null : (
         <nav className="jev-tabs" role="tablist">
-          {TABS.map(item => (
+          {tabs().map(item => (
             <button
               key={item.id}
               role="tab"
@@ -1772,15 +1797,15 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
 
       {loading && status === null ? (
         <div className="jev-empty">
-          <b>正在连接本地 API…</b>
-          <div>首次加载会拉取状态、统计与最近 80 条决策。</div>
+          <b>{t('panel.connectingToTheLocalApi')}</b>
+          <div>{t('panel.initialLoadFetchesStatusStatisticsAndThe')}</div>
         </div>
       ) : null}
 
       {status === null ? null : (
-        // tab 内容区自带滚动（flex:1 + min-height:0）：不依赖 dsh 布局的父级
-        // 高度链（centerCol 是 overflow:hidden 裁剪容器，外部滚动不可用）。
-        // 主路径（分页 20 条/页）不依赖滚动，这里只是长内容（概览/设置）的兜底。
+        // The tab body owns scrolling; it does not depend on the parent height chain.
+        // The host center column clips overflow, so external scrolling is unavailable.
+        // Pagination handles the main log; scrolling supports longer overview and settings content.
         <div className="jev-tab-body" style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>
           {tab === 'overview'
             ? renderOverview()
@@ -1794,10 +1819,10 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
 
       {status === null && !loading ? (
         <div className="jev-empty">
-          <b>面板暂时读不到状态</b>
-          <div>{loadErr.length === 0 ? '宿主半没有响应。' : loadErr}</div>
+          <b>{t('panel.panelStatusIsUnavailable')}</b>
+          <div>{loadErr.length === 0 ? t('panel.theHostDidNotRespond') : loadErr}</div>
           <div className="jev-row-actions">
-            <button className="jev-btn" onClick={() => { void load(false) }}>重试</button>
+            <button className="jev-btn" onClick={() => { void load(false) }}>{t('panel.retry')}</button>
           </div>
         </div>
       ) : null}

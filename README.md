@@ -23,7 +23,7 @@ English | [中文](README.zh.md)
   <img src="imgs/image-5.png" width="32%" alt="Settings with provider picker and connection test">
 </p>
 
-> The Web panel (sidebar ⚡ → Jev 决策): live KPIs and net-benefit card, a filterable decision log with full evidence per row, shadow-data threshold advice that tracks whether you adopted it, and one-click connection test. Every screenshot above is the real plugin running real decisions.
+> The Web panel (sidebar ⚡ → Jev decisions): live KPIs and net-benefit card, a filterable decision log with full evidence per row, shadow-data threshold advice that tracks whether you adopted it, and one-click connection test. Every screenshot above is the real plugin running real decisions. Use the English / 中文 button next to Refresh to switch the GUI language — the panel and every message the plugin generates (approval reasons, stagnation notices, command reports) follow it together, because the Host persists the choice and the plugin's server half reads the same preference. A first visit without a saved preference follows the browser language (English for unsupported languages).
 
 **What it does, in one breath:** before a tool call runs, Jev classifies its risk, irreversibility, task-fit, and injection-suspicion in one ~$0.00002 request — confident high-risk calls get denied, medium ones escalate to a human, and clearly-granted reversible ones stop wasting your clicks on approval dialogs. And when an `@session` snapshot gets injected, Jev scores every message's value for the citing task so the **error traceback survives the byte budget instead of the oldest small talk**. Every doubt, every timeout, every missing key degrades to stock dsh behavior. Nothing to configure away, nothing that can widen a permission.
 
@@ -64,6 +64,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
   config:
     enabled: true
     mode: shadow            # watch mode first: records every decision, enforces nothing
+    locale: auto            # message language: auto follows the GUI | en | zh
     provider: typesafe      # or 'openrouter' (works today, no waitlist) | 'custom'
 ```
 
@@ -114,7 +115,7 @@ Calibration closes its own loop: every `/jev-calibrate` run snapshots the report
 - **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`), with `callId` correlation and full-precision `scores` for calibration replays; the log rotates at 20 MB. `/jev-stats` aggregates per hook, `/jev-log` shows per-decision detail, and the Web panel charts it all.
 - **Calibratable, not guessed.** `/jev-calibrate` replays your shadow telemetry through the *same* decision matrix and suggests threshold moves (±0.05 steps, ≥30 samples for routine moves — ≥10 once a mis-approval danger signal appears, tighten-only; injection thresholds never relaxed, nothing auto-applied).
 
-All of this is enforced by **169 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
+All of this is enforced by **191 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
 
 ## Configure
 
@@ -158,7 +159,7 @@ The client speaks the plain `state + questions` wire shape shared by TypeSafe di
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
 npm run typecheck                # src + tests, against real @deepseek-ai types
-npm test                         # vitest, 169 tests, no network
+npm test                         # vitest, 191 tests, no network
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # one real decision against a live provider
 ```
