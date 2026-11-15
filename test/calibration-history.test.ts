@@ -17,6 +17,7 @@ const current: ThresholdsInput = {
   guardIrreversibleCeiling: 0.2,
   guardIrreversibleDenyFloor: 0.5,
   guardInjectionAskThreshold: 0.8,
+  guardUserRequestedMin: 0.85,
   preapproveAutoApproveMin: 0.85,
   preapproveIrreversibleMax: 0.15,
   preapproveInjectionSuspectMax: 0.5,

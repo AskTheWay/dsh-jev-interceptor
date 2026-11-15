@@ -20,6 +20,7 @@ const current: ThresholdsInput = {
   guardIrreversibleCeiling: 0.2,
   guardIrreversibleDenyFloor: 0.5,
   guardInjectionAskThreshold: 0.8,
+  guardUserRequestedMin: 0.85,
   preapproveAutoApproveMin: 0.85,
   preapproveIrreversibleMax: 0.15,
   preapproveInjectionSuspectMax: 0.5,
@@ -32,14 +33,15 @@ function guardEntry(
   irrev: number,
   task = 0.9,
   inj = 0.02,
+  user = 0.05,
 ): TelemetryEntry {
   return {
     ts: '2026-10-08T00:00:00.000Z',
     tag: 'guard',
     mode: 'shadow',
     action: 'delegate',
-    detail: `risk=${risk} p=${p.toFixed(2)} irrev=${irrev.toFixed(2)} task=${task.toFixed(2)} inj=${inj.toFixed(2)}`,
-    scores: { risk_p: p, irrev, task, inj },
+    detail: `risk=${risk} p=${p.toFixed(2)} irrev=${irrev.toFixed(2)} task=${task.toFixed(2)} inj=${inj.toFixed(2)} user=${user.toFixed(2)}`,
+    scores: { risk_p: p, irrev, task, inj, user },
   }
 }
 
@@ -57,8 +59,10 @@ function loopEntry(bucket: string): TelemetryEntry {
 describe('parseGuardDetail', () => {
   it('parses the answerDetail format', () => {
     expect(parseGuardDetail('risk=medium p=0.78 irrev=0.10 task=0.90 inj=0.02')).toEqual({
-      risk: 'medium', riskConfidence: 0.78, irreversibility: 0.10, taskMatch: 0.90, injection: 0.02,
+      risk: 'medium', riskConfidence: 0.78, irreversibility: 0.10, taskMatch: 0.90, injection: 0.02, userRequested: 0.0,
     })
+    // 新格式带 user token。
+    expect(parseGuardDetail('risk=medium p=0.78 irrev=0.10 task=0.90 inj=0.02 user=0.90')?.userRequested).toBeCloseTo(0.90, 10)
   })
 
   it('tolerates trailing additions (anchored at ^ only) and rejects garbage', () => {
@@ -107,10 +111,10 @@ describe('sample extraction', () => {
 describe('replayGuard', () => {
   it('counts exactly what per-sample decideGuard decides (matrix stays the single source of truth)', () => {
     const samples = [
-      { risk: 'low' as const, riskConfidence: 0.9, irreversibility: 0.05, taskMatch: 0.9, injection: 0.02 },
-      { risk: 'medium' as const, riskConfidence: 0.8, irreversibility: 0.1, taskMatch: 0.9, injection: 0.02 },
-      { risk: 'high' as const, riskConfidence: 0.9, irreversibility: 0.8, taskMatch: 0.9, injection: 0.02 },
-      { risk: 'low' as const, riskConfidence: 0.9, irreversibility: 0.3, taskMatch: 0.9, injection: 0.02 },
+      { risk: 'low' as const, riskConfidence: 0.9, irreversibility: 0.05, taskMatch: 0.9, injection: 0.02, userRequested: 0.05 },
+      { risk: 'medium' as const, riskConfidence: 0.8, irreversibility: 0.1, taskMatch: 0.9, injection: 0.02, userRequested: 0.05 },
+      { risk: 'high' as const, riskConfidence: 0.9, irreversibility: 0.8, taskMatch: 0.9, injection: 0.02, userRequested: 0.05 },
+      { risk: 'low' as const, riskConfidence: 0.9, irreversibility: 0.3, taskMatch: 0.9, injection: 0.02, userRequested: 0.05 },
     ]
     const thresholds = {
       confidenceMin: current.guardConfidenceMin,
@@ -118,6 +122,7 @@ describe('replayGuard', () => {
       irreversibleCeiling: current.guardIrreversibleCeiling,
       irreversibleDenyFloor: current.guardIrreversibleDenyFloor,
       injectionAskThreshold: current.guardInjectionAskThreshold,
+      userRequestedMin: current.guardUserRequestedMin,
     }
     const replay = replayGuard(samples, thresholds)
     const manual = { delegate: 0, ask: 0, deny: 0 }
@@ -127,6 +132,7 @@ describe('replayGuard', () => {
         irreversible: { type: 'noul', noul: sample.irreversibility },
         matchesTask: { type: 'noul', noul: sample.taskMatch },
         injectionSuspect: { type: 'noul', noul: sample.injection },
+        userRequested: { type: 'noul', noul: sample.userRequested },
       }, thresholds)
       manual[decision.kind] += 1
     }
@@ -135,8 +141,8 @@ describe('replayGuard', () => {
 
   it('attributes branches that mirror decideGuard conditions', () => {
     expect(guardBranchOf(
-      { risk: 'high', riskConfidence: 0.9, irreversibility: 0.8, taskMatch: 0.9, injection: 0.02 },
-      { confidenceMin: 0.6, denyConfidence: 0.85, irreversibleCeiling: 0.2, irreversibleDenyFloor: 0.5, injectionAskThreshold: 0.8 },
+      { risk: 'high', riskConfidence: 0.9, irreversibility: 0.8, taskMatch: 0.9, injection: 0.02, userRequested: 0.05 },
+      { confidenceMin: 0.6, denyConfidence: 0.85, irreversibleCeiling: 0.2, irreversibleDenyFloor: 0.5, injectionAskThreshold: 0.8, userRequestedMin: 0.85 },
     )).toBe('deny')
   })
 })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-jev-interceptor",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Millisecond System-1 judgement for every tool call in DeepSeek Harness: Jev-powered risk classification and evidence-gated auto-approval, fail-closed by construction.",
   "type": "module",
   "main": "lib/index.js",
@@ -63,49 +63,44 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-client-connection": "*",
-    "@deepseek-ai/dsh-commands": "*",
-    "@deepseek-ai/dsh-compaction": "*",
-    "@deepseek-ai/dsh-credentials": "*",
-    "@deepseek-ai/dsh-home-paths": "*",
-    "@deepseek-ai/dsh-launch-environment": "*",
-    "@deepseek-ai/dsh-llm": "*",
-    "@deepseek-ai/dsh-output-retention": "*",
-    "@deepseek-ai/dsh-session-query": "*",
-    "@deepseek-ai/dsh-session-reference": "*",
-    "@deepseek-ai/dsh-settings": "*",
-    "@deepseek-ai/dsh-tools": "*",
-    "@deepseek-ai/dsh-typert-protocol": "*",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/cordis": ">=4.0.2 <5.0.0",
+    "@deepseek-ai/dsh-agent": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-client-connection": ">=0.0.1-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-commands": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-home-paths": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-session": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-settings": ">=0.1.5-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2 <0.3.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/dsh-agent": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-client-ui-layout": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.0.1-rc.1",
-    "@deepseek-ai/dsh-commands": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-compaction": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-credentials": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-home-paths": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-launch-environment": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-llm": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-output-retention": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-permission-presets": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-session": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-session-query": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-session-reference": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-settings": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-tools": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-typert-protocol": "0.1.7-alpha.2",
-    "@deepseek-ai/dsh-user-approval": "0.1.7-alpha.2",
-    "@deepseek-ai/schemastery": "3.18.4",
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-client-ui-layout": "^0.2.2-rc.3",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.2.2-rc.3",
+    "@deepseek-ai/dsh-commands": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-compaction": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-home-paths": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-launch-environment": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-output-retention": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-permission-presets": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-session-query": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-session-reference": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-settings": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-user-approval": "0.2.2-rc.3",
+    "@deepseek-ai/schemastery": "^3.19.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
     "react": "^19.3.1",
     "tsdown": "^0.23.1",
     "typescript": "^5.8.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "@deepseek-ai/dsh-error": "0.2.2-rc.3"
   },
   "author": "AskTheWay",
   "repository": {
@@ -115,5 +110,8 @@
   "bugs": {
     "url": "https://github.com/AskTheWay/dsh-jev-interceptor/issues"
   },
-  "homepage": "https://github.com/AskTheWay/dsh-jev-interceptor#readme"
+  "homepage": "https://github.com/AskTheWay/dsh-jev-interceptor#readme",
+  "dependencies": {
+    "@deepseek-ai/dsh-error": "^0.2.2-rc.3"
+  }
 }

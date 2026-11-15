@@ -120,11 +120,13 @@ function thresholdsOf(s: ResolvedSettings): ThresholdsInput {
     guardIrreversibleCeiling: s.guardIrreversibleCeiling,
     guardIrreversibleDenyFloor: s.guardIrreversibleDenyFloor,
     guardInjectionAskThreshold: s.guardInjectionAskThreshold,
+    guardUserRequestedMin: s.guardUserRequestedMin,
     preapproveAutoApproveMin: s.preapproveAutoApproveMin,
     preapproveIrreversibleMax: s.preapproveIrreversibleMax,
     preapproveInjectionSuspectMax: s.preapproveInjectionSuspectMax,
   }
 }
+
 
 /**
  * Mount the guard and pre-approval hooks, the shared Jev client, telemetry,
@@ -207,14 +209,19 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   // Register our Config schema with the settings provider → the Plugins page
-  // discovers it via describe() and renders the form.
+  // discovers it via describe() and renders the form. 0.2.x hosts expose a
+  // different service shape (installSection absent) — registration is
+  // best-effort; the Web panel remains the primary config surface either way.
   ctx.inject(['settings'], (settingsCtx) => {
-    ctx.logger.info('dsh-jev-interceptor: settings service available, attempting registration')
     try {
       const service = settingsCtx.settings as unknown as {
-        installSection: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: {
+        installSection?: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: {
           setSource?: (source: unknown) => void
         }) => void
+      }
+      if (typeof service.installSection !== 'function') {
+        ctx.logger.info('dsh-jev-interceptor: settings service has no installSection (0.2.x shape) — panel is the config surface')
+        return
       }
       service.installSection(ctx, 'jev-interceptor', Config, config, {
         setSource: (source) => {
@@ -274,7 +281,7 @@ export function apply(ctx: Context, config: Config): void {
         enabled: s.enabled,
         mode: s.mode,
         provider: cfg.provider ?? 'typesafe',
-        model: cfg.model ?? 'jev-latest',
+        model: resolveEndpoint(cfg).model,
         keyConfigured: cfg.apiKey !== undefined && cfg.apiKey.length > 0,
         keySource: cfg.apiKey !== undefined && cfg.apiKey.length > 0 ? 'config' : 'env',
         // null = 设置服务不落盘（面板保存后据此警告"重启丢失"）。
@@ -358,6 +365,7 @@ export function apply(ctx: Context, config: Config): void {
           irreversibleCeiling: t.guardIrreversibleCeiling,
           irreversibleDenyFloor: t.guardIrreversibleDenyFloor,
           injectionAskThreshold: t.guardInjectionAskThreshold,
+          userRequestedMin: t.guardUserRequestedMin,
         }
       },
       recentMessages: settings.recentMessages,

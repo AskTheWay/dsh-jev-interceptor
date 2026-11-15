@@ -76,6 +76,12 @@ export interface Config {
   guardIrreversibleDenyFloor?: number
   /** Injection probability at/above which a call escalates regardless of risk (default 0.8). */
   guardInjectionAskThreshold?: number
+  /**
+   * 用户明确要求的置信门（default 0.85）：guard 第 5 问判定"用户近期是否明确
+   * 要求了这件事"，高置信时中风险 ask 降为放行（用户已经确认过）。
+   * deny 与注入/不可逆升级永不因它解除。设 1 以上可关闭该降级。
+   */
+  guardUserRequestedMin?: number
 
   /** Pre-approval hook master switch (default on when the plugin is enabled). */
   preapproveEnabled?: boolean
@@ -150,6 +156,7 @@ export const DEFAULTS = {
   guardIrreversibleCeiling: 0.2,
   guardIrreversibleDenyFloor: 0.5,
   guardInjectionAskThreshold: 0.8,
+  guardUserRequestedMin: 0.85,
   preapproveEnabled: true,
   preapproveToolAllowlist: [] as string[],
   preapproveAutoApproveMin: 0.85,
@@ -193,6 +200,7 @@ export const Config: z<Config> = z.object({
   guardIrreversibleCeiling: z.number().min(0).max(1).default(DEFAULTS.guardIrreversibleCeiling),
   guardIrreversibleDenyFloor: z.number().min(0).max(1).default(DEFAULTS.guardIrreversibleDenyFloor),
   guardInjectionAskThreshold: z.number().min(0).max(1).default(DEFAULTS.guardInjectionAskThreshold),
+  guardUserRequestedMin: z.number().min(0).max(1).default(DEFAULTS.guardUserRequestedMin),
 
   preapproveEnabled: z.boolean().default(DEFAULTS.preapproveEnabled),
   preapproveToolAllowlist: z.array(z.string()).default(DEFAULTS.preapproveToolAllowlist),
@@ -238,6 +246,7 @@ export interface ResolvedSettings {
   readonly guardIrreversibleCeiling: number
   readonly guardIrreversibleDenyFloor: number
   readonly guardInjectionAskThreshold: number
+  readonly guardUserRequestedMin: number
   readonly preapproveEnabled: boolean
   readonly preapproveToolAllowlist: ReadonlySet<string>
   readonly preapproveAutoApproveMin: number
@@ -287,6 +296,7 @@ export function resolveSettings(config: Config): ResolvedSettings {
     guardIrreversibleCeiling: config.guardIrreversibleCeiling ?? DEFAULTS.guardIrreversibleCeiling,
     guardIrreversibleDenyFloor: config.guardIrreversibleDenyFloor ?? DEFAULTS.guardIrreversibleDenyFloor,
     guardInjectionAskThreshold: config.guardInjectionAskThreshold ?? DEFAULTS.guardInjectionAskThreshold,
+    guardUserRequestedMin: config.guardUserRequestedMin ?? DEFAULTS.guardUserRequestedMin,
     preapproveEnabled: config.preapproveEnabled ?? DEFAULTS.preapproveEnabled,
     preapproveToolAllowlist: new Set(config.preapproveToolAllowlist ?? DEFAULTS.preapproveToolAllowlist),
     preapproveAutoApproveMin: config.preapproveAutoApproveMin ?? DEFAULTS.preapproveAutoApproveMin,
@@ -309,10 +319,20 @@ export const TYPESAFE_ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 /** OpenRouter's alpha decisions endpoint (model ids carry a `~` prefix there). */
 export const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/alpha/decisions'
 
-/** Default model id for the TypeSafe provider preset. */
-export const TYPESAFE_MODEL = 'jev-latest'
+/**
+ * Default model id for the TypeSafe provider preset.
+ * Pinned to a concrete version (not `jev-latest`): the official docs warn that
+ * alias redeployment changes answers — calibrated thresholds silently break.
+ * Upgrade deliberately: bump the pin, re-run /jev-calibrate, compare snapshots.
+ */
+export const TYPESAFE_MODEL = 'jev-1.14.0'
 
-/** Default model id for the OpenRouter provider preset. */
+/**
+ * OpenRouter preset model. The platform rejects versioned ids (only
+ *  resolves); pin-drift protection comes from recording
+ * the provider-reported version (response.model) into telemetry on every call
+ * — drift is visible in /jev-log, not silent.
+ */
 export const OPENROUTER_MODEL = '~typesafe/jev-latest'
 
 /**

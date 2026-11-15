@@ -7,6 +7,7 @@ const thresholds: GuardThresholds = {
   irreversibleCeiling: 0.2,
   irreversibleDenyFloor: 0.5,
   injectionAskThreshold: 0.8,
+  userRequestedMin: 0.85,
 }
 
 function answers(overrides: Partial<GuardAnswers> = {}): GuardAnswers {
@@ -15,6 +16,7 @@ function answers(overrides: Partial<GuardAnswers> = {}): GuardAnswers {
     irreversible: { type: 'noul', noul: 0.05 },
     matchesTask: { type: 'noul', noul: 0.9 },
     injectionSuspect: { type: 'noul', noul: 0.02 },
+    userRequested: { type: 'noul', noul: 0.05 },
     ...overrides,
   }
 }
@@ -120,5 +122,46 @@ describe('decidePreapprove', () => {
 
   it('blocks on injection suspicion at or above the ceiling', () => {
     expect(decidePreapprove(pre({ injectionSuspect: { type: 'noul', noul: 0.6 } }), thresholds).kind).toBe('human')
+  })
+})
+
+describe('user_requested de-escalation', () => {
+  const medium = { type: 'choice' as const, choice: 'medium' as const, probabilities: { low: 0.1, medium: 0.8, high: 0.1 }, confidence: 0.8 }
+
+  it('delegates a confident medium-risk ask when the user explicitly requested it', () => {
+    const yes = answers({ risk: medium, userRequested: { type: 'noul', noul: 0.92 } })
+    const decision = decideGuard(yes, thresholds)
+    expect(decision.kind).toBe('delegate')
+  })
+
+  it('keeps the ask when the user-request confidence is below the gate', () => {
+    const no = answers({ risk: medium, userRequested: { type: 'noul', noul: 0.5 } })
+    expect(decideGuard(no, thresholds).kind).toBe('ask')
+  })
+
+  it('never releases deny, injection, or irreversibility escalations via user_requested', () => {
+    const denyWorthy = answers({
+      risk: { type: 'choice', choice: 'high', probabilities: { low: 0.02, medium: 0.08, high: 0.9 }, confidence: 0.9 },
+      irreversible: { type: 'noul', noul: 0.8 },
+      userRequested: { type: 'noul', noul: 0.99 },
+    })
+    expect(decideGuard(denyWorthy, thresholds).kind).toBe('deny')
+    const injected = answers({ injectionSuspect: { type: 'noul', noul: 0.9 }, userRequested: { type: 'noul', noul: 0.99 } })
+    expect(decideGuard(injected, thresholds).kind).toBe('ask')
+    expect(decideGuard(injected, thresholds).kind === 'ask' && (decideGuard(injected, thresholds) as { reason: string }).reason.includes('注入')).toBe(true)
+    const irreversible = answers({ irreversible: { type: 'noul', noul: 0.3 }, userRequested: { type: 'noul', noul: 0.99 } })
+    expect(decideGuard(irreversible, thresholds).kind).toBe('ask')
+  })
+
+  it('surfaces user evidence in the reason and denies carry a fix suggestion', () => {
+    const asked = decideGuard(answers({ risk: medium, userRequested: { type: 'noul', noul: 0.4 } }), thresholds)
+    expect(asked.kind === 'ask' && asked.reason.includes('user=')).toBe(false)
+    const askedVisible = decideGuard(answers({ risk: medium, userRequested: { type: 'noul', noul: 0.6 } }), thresholds)
+    expect(askedVisible.kind === 'ask' && askedVisible.reason.includes('user=0.60')).toBe(true)
+    const denied = decideGuard(answers({
+      risk: { type: 'choice', choice: 'high', probabilities: { low: 0.02, medium: 0.08, high: 0.9 }, confidence: 0.9 },
+      irreversible: { type: 'noul', noul: 0.8 },
+    }), thresholds)
+    expect(denied.kind === 'deny' && denied.reason.includes('建议')).toBe(true)
   })
 })

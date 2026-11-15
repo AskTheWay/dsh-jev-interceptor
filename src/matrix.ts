@@ -22,6 +22,7 @@ export interface GuardAnswers {
   readonly irreversible: NoulAnswer
   readonly matchesTask: NoulAnswer
   readonly injectionSuspect: NoulAnswer
+  readonly userRequested: NoulAnswer
 }
 
 /** Tunable thresholds consumed by {@link decideGuard}. */
@@ -36,6 +37,11 @@ export interface GuardThresholds {
   readonly irreversibleDenyFloor: number
   /** Injection probability at or above which the call escalates regardless of risk. */
   readonly injectionAskThreshold: number
+  /**
+   * 用户明确要求的置信门：`user_requested` 高于此值时，中风险 ask 降为放行
+   * （用户在自己的消息里已确认过该动作）。deny 与注入/不可逆升级永不因它解除。
+   */
+  readonly userRequestedMin: number
 }
 
 /** One resolved guard action; `delegate` maps to `next()` in the listener. */
@@ -60,13 +66,14 @@ function p(value: number): string {
  *   matchesTask.noul < 0.5（不利证据）时追加 ` · task=0.12`。
  */
 export function guardEvidence(answers: GuardAnswers): string {
-  const { risk, irreversible, matchesTask, injectionSuspect } = answers
+  const { risk, irreversible, matchesTask, injectionSuspect, userRequested } = answers
   const parts = [
     `risk=${risk.choice} ${p(risk.probabilities[risk.choice] ?? risk.confidence)}`,
     `irrev=${p(irreversible.noul)}`,
     `inj=${p(injectionSuspect.noul)}`,
   ]
   if (matchesTask.noul < 0.5) parts.push(`task=${p(matchesTask.noul)}`)
+  if (userRequested.noul >= 0.5) parts.push(`user=${p(userRequested.noul)}`)
   return parts.join(' · ')
 }
 
@@ -77,30 +84,35 @@ export function guardEvidence(answers: GuardAnswers): string {
  * @returns the action the pre-execute listener takes.
  */
 export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds): GuardAction {
-  const { risk, irreversible, injectionSuspect } = answers
+  const { risk, irreversible, injectionSuspect, userRequested } = answers
   // 证据摘要统一附在中文结论后；reason 行首的 `jev-guard:` 前缀是安全协议
   // （preapprove 靠它识别并跳过本插件的升级，绝不自动批 guard 的 ask），不可移除。
   const evidence = guardEvidence(answers)
   if (injectionSuspect.noul >= thresholds.injectionAskThreshold) {
     return {
       kind: 'ask',
-      reason: `jev-guard: 工具输入疑似提示注入，升级人工确认（${evidence}）`,
+      reason: `jev-guard: 工具输入疑似提示注入，升级人工确认（${evidence}）。建议：检查参数中被标记为"对 AI 说的指令"的文本，移除后重试`,
     }
   }
   if (risk.choice === 'high') {
     if (risk.confidence >= thresholds.denyConfidence && irreversible.noul >= thresholds.irreversibleDenyFloor) {
       return {
         kind: 'deny',
-        reason: `jev-guard: 高风险且不可逆，已拦截（${evidence}）`,
+        reason: `jev-guard: 高风险且不可逆，已拦截（${evidence}）。建议：缩小影响范围或先备份，由用户手动执行；确认无误后可临时停用本插件（/jev-off）`,
       }
     }
     return {
       kind: 'ask',
-      reason: `jev-guard: 高风险调用，需人工确认（${evidence}）`,
+      reason: `jev-guard: 高风险调用，需人工确认（${evidence}）。建议：核对目标与影响范围，必要时缩小范围后重试`,
     }
   }
   if (risk.choice === 'medium') {
     if (risk.confidence < thresholds.confidenceMin) return { kind: 'delegate' }
+    // 用户明确要求的降级通道：用户在自己的消息里已确认该动作时，中风险
+    // 不再打扰（确认即授权）。deny 与注入/不可逆升级不经此通道。
+    if (userRequested.noul >= thresholds.userRequestedMin) {
+      return { kind: 'delegate' }
+    }
     return {
       kind: 'ask',
       reason: `jev-guard: 中风险调用，需人工确认（${evidence}）`,

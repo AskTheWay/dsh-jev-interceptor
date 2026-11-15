@@ -26,7 +26,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmCallConfig, UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionReferenceError, SessionReferenceResolver } from '@deepseek-ai/dsh-session-reference'
 import type { Config as BaseConfig, SessionReferenceInput } from '@deepseek-ai/dsh-session-reference'
 // Type-only: registers the 'sessionQuery' Context key used by the pre-warm reads.
@@ -228,6 +228,7 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
    * @param agent - agent entering the model step.
    * @param content - already host-normalized readable message content.
    * @param references - structured source sessions in mention order.
+   * @param route - provider/model of the step (0.2.x: sizes the reference budget).
    * @param signal - optional cancellation boundary for the active turn.
    * @returns the inherited preparation result.
    */
@@ -235,6 +236,7 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
     agent: Agent,
     content: ContentBlock[],
     references: SessionReferenceInput[],
+    route: Readonly<Pick<LlmCallConfig, 'provider' | 'model'>>,
     signal?: AbortSignal,
   ): Promise<{ content: ContentBlock[]; additionalContext?: UserMessage }> {
     try {
@@ -242,7 +244,7 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
     } catch {
       // Scoring is best-effort; retention falls back to upstream FIFO.
     }
-    return super.prepare(agent, content, references, signal)
+    return super.prepare(agent, content, references, route, signal)
   }
 
   /** Score the droppable messages of every referenced session once per step. */

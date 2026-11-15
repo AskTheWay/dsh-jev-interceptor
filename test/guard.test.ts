@@ -37,6 +37,7 @@ function fakeResult(overrides: Partial<ClassifyResult> = {}): ClassifyResult {
       irreversible: { type: 'noul', noul: 0.05 },
       matches_task: { type: 'noul', noul: 0.9 },
       injection_suspect: { type: 'noul', noul: 0.01 },
+      user_requested: { type: 'noul', noul: 0.05 },
     },
     model: 'jev-1.13.0',
     latencyMs: 120,
@@ -61,6 +62,7 @@ async function makeDeps(overrides: Partial<Omit<GuardDeps, 'live'>> & { live?: (
       irreversibleCeiling: 0.2,
       irreversibleDenyFloor: 0.5,
       injectionAskThreshold: 0.8,
+      userRequestedMin: 0.85,
     }) satisfies GuardThresholds as GuardThresholds,
     recentMessages: 6,
     recentMessageChars: 300,
@@ -122,6 +124,7 @@ describe('createGuardListener', () => {
           irreversible: { type: 'noul', noul: 0.8 },
           matches_task: { type: 'noul', noul: 0.5 },
           injection_suspect: { type: 'noul', noul: 0.01 },
+          user_requested: { type: 'noul', noul: 0.05 },
         },
       }),
     }))
@@ -143,6 +146,7 @@ describe('createGuardListener', () => {
           irreversible: { type: 'noul', noul: 0.1 },
           matches_task: { type: 'noul', noul: 0.9 },
           injection_suspect: { type: 'noul', noul: 0.01 },
+          user_requested: { type: 'noul', noul: 0.05 },
         },
       }),
     })
@@ -161,6 +165,7 @@ describe('createGuardListener', () => {
           irreversible: { type: 'noul', noul: 0.9 },
           matches_task: { type: 'noul', noul: 0.5 },
           injection_suspect: { type: 'noul', noul: 0.01 },
+          user_requested: { type: 'noul', noul: 0.05 },
         },
       }),
     }))
@@ -178,6 +183,7 @@ describe('createGuardListener', () => {
           irreversible: { type: 'noul', noul: 0.9 },
           matches_task: { type: 'noul', noul: 0.5 },
           injection_suspect: { type: 'noul', noul: 0.01 },
+          user_requested: { type: 'noul', noul: 0.05 },
         },
       }) },
     }))
@@ -194,6 +200,7 @@ describe('createGuardListener', () => {
         irreversible: { type: 'noul', noul: 0.8 },
         matches_task: { type: 'noul', noul: 0.5 },
         injection_suspect: { type: 'noul', noul: 0.01 },
+        user_requested: { type: 'noul', noul: 0.05 },
       },
     })
     const listener = createGuardListener(await makeDeps({
@@ -215,6 +222,7 @@ describe('threshold hot-reload', () => {
       irreversibleCeiling: 0.2,
       irreversibleDenyFloor: 0.5,
       injectionAskThreshold: 0.8,
+      userRequestedMin: 0.85,
     }
     const listener = createGuardListener(await makeDeps({
       thresholds: () => ({ ...thresholds }),
@@ -224,6 +232,7 @@ describe('threshold hot-reload', () => {
           irreversible: { type: 'noul', noul: 0.1 },
           matches_task: { type: 'noul', noul: 0.9 },
           injection_suspect: { type: 'noul', noul: 0.01 },
+          user_requested: { type: 'noul', noul: 0.05 },
         },
       }),
     }))
