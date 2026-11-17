@@ -136,6 +136,7 @@ const TAG_META: Record<string, { label: string; hint: string; tone: Tone }> = {
   'session-reference': { label: '会话保留', hint: '@ 引用快照的价值打分', tone: 'business' },
   'approval-loop': { label: '审批一致率', hint: '影子决策与人工决定的对照', tone: 'muted' },
   stagnation: { label: '停滞检测', hint: '重复失败时提醒换路', tone: 'warn' },
+  untrusted: { label: '注入扫描', hint: '工具结果中的注入指令标记与拦截', tone: 'err' },
 }
 
 /**
@@ -156,6 +157,7 @@ const ACTION_META: Record<string, { label: string; tone: Tone; fallback?: boolea
   'retention-fifo': { label: 'FIFO 淘汰', tone: 'muted' },
   agreement: { label: '一致率', tone: 'brand' },
   'stagnation-alert': { label: '停滞提醒', tone: 'warn' },
+  marked: { label: '标记注入', tone: 'err' },
 }
 
 /** 降级回退的斜纹底（与实色决策形成"生效/未生效"的视觉区分）。 */

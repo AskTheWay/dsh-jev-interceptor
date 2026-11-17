@@ -65,6 +65,7 @@ import { createPreapproveListener } from './preapprove.js'
 import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
 import { createStagnationListener, StagnationTracker, type StagnationThresholds } from './stagnation.js'
+import { createUntrustedScanListener, UntrustedMarks } from './untrusted.js'
 import { registerJevApi } from './jev-api.js'
 import { approvalBucketsOf, assessReadiness, calibrate, renderCalibration, suggestAllowlist, THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness, type ThresholdsInput } from './calibrate.js'
 import {
@@ -121,6 +122,7 @@ function thresholdsOf(s: ResolvedSettings): ThresholdsInput {
     guardIrreversibleDenyFloor: s.guardIrreversibleDenyFloor,
     guardInjectionAskThreshold: s.guardInjectionAskThreshold,
     guardUserRequestedMin: s.guardUserRequestedMin,
+    guardFromUntrustedMin: s.guardFromUntrustedMin,
     preapproveAutoApproveMin: s.preapproveAutoApproveMin,
     preapproveIrreversibleMax: s.preapproveIrreversibleMax,
     preapproveInjectionSuspectMax: s.preapproveInjectionSuspectMax,
@@ -140,6 +142,7 @@ export function apply(ctx: Context, config: Config): void {
   const telemetry = new Telemetry(settings.telemetryDir)
   const pendingAsks = new PendingAsks()
   const approvalTrace = new ApprovalTrace()
+  const untrustedMarksStore = new UntrustedMarks()
 
   /**
    * 生成一份校准报告并落一份快照：读上一份快照对比「上次建议 → 是否采纳
@@ -366,6 +369,7 @@ export function apply(ctx: Context, config: Config): void {
           irreversibleDenyFloor: t.guardIrreversibleDenyFloor,
           injectionAskThreshold: t.guardInjectionAskThreshold,
           userRequestedMin: t.guardUserRequestedMin,
+          fromUntrustedMin: t.guardFromUntrustedMin,
         }
       },
       recentMessages: settings.recentMessages,
@@ -376,6 +380,7 @@ export function apply(ctx: Context, config: Config): void {
       telemetry,
       pendingAsks,
       live,
+      untrustedMarks: untrustedMarksStore,
       // Resolved per event: a capture here could miss a service that activates later.
       permissionPresets: () => ctx.get('permissionPresets'),
     }))
@@ -437,6 +442,13 @@ export function apply(ctx: Context, config: Config): void {
     })
     ctx.on('tools/post-execute', stagnation.onPostExecute)
     ctx.on('agent/pre-step', stagnation.onPreStep)
+  }
+
+  // 间接注入联防（default on）：post-execute 两层扫描工具结果中的注入指令并
+  // 标记；guard 的第 6 问（from_untrusted）据此否决对标记指令的执行。
+  if (settings.untrustedScanEnabled) {
+    const scan = createUntrustedScanListener({ live, marks: untrustedMarksStore, jev, telemetry })
+    ctx.on('tools/post-execute', scan.onPostExecute)
   }
 
   // Approval data loop: durable asked/decided audit events correlate with
@@ -594,7 +606,7 @@ export function apply(ctx: Context, config: Config): void {
           `  模式   ${s.mode}${s.mode === 'shadow' ? '（只记录）' : '（执行决策）'}`,
           `  源     ${config.provider ?? 'typesafe'}`,
           `  模型   ${model}`,
-          `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}  停滞 ${settings.stagnationEnabled ? '✅' : '❌'}`,
+          `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}  停滞 ${settings.stagnationEnabled ? '✅' : '❌'}  注入扫描 ${settings.untrustedScanEnabled ? '✅' : '❌'}`,
           resolveSettings(configOverride ?? config).dailyCostLimitUsd > 0
             ? `  成本   今日 $${jev.costTodayUsd().toFixed(6)} / 限额 $${resolveSettings(configOverride ?? config).dailyCostLimitUsd.toFixed(2)}${jev.costTodayUsd() >= resolveSettings(configOverride ?? config).dailyCostLimitUsd ? '（已超限，降级中）' : ''}`
             : '',

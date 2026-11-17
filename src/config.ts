@@ -82,6 +82,10 @@ export interface Config {
    * deny 与注入/不可逆升级永不因它解除。设 1 以上可关闭该降级。
    */
   guardUserRequestedMin?: number
+  /** 执行注入指令的 deny 门（第 6 问 from_untrusted，default 0.8）。 */
+  guardFromUntrustedMin?: number
+  /** 工具结果注入扫描（post-execute 两层扫描 + 标记窗口；default on）。 */
+  untrustedScanEnabled?: boolean
 
   /** Pre-approval hook master switch (default on when the plugin is enabled). */
   preapproveEnabled?: boolean
@@ -157,6 +161,8 @@ export const DEFAULTS = {
   guardIrreversibleDenyFloor: 0.5,
   guardInjectionAskThreshold: 0.8,
   guardUserRequestedMin: 0.85,
+  guardFromUntrustedMin: 0.8,
+  untrustedScanEnabled: true,
   preapproveEnabled: true,
   preapproveToolAllowlist: [] as string[],
   preapproveAutoApproveMin: 0.85,
@@ -201,6 +207,8 @@ export const Config: z<Config> = z.object({
   guardIrreversibleDenyFloor: z.number().min(0).max(1).default(DEFAULTS.guardIrreversibleDenyFloor),
   guardInjectionAskThreshold: z.number().min(0).max(1).default(DEFAULTS.guardInjectionAskThreshold),
   guardUserRequestedMin: z.number().min(0).max(1).default(DEFAULTS.guardUserRequestedMin),
+  guardFromUntrustedMin: z.number().min(0).max(1).default(DEFAULTS.guardFromUntrustedMin),
+  untrustedScanEnabled: z.boolean().default(DEFAULTS.untrustedScanEnabled),
 
   preapproveEnabled: z.boolean().default(DEFAULTS.preapproveEnabled),
   preapproveToolAllowlist: z.array(z.string()).default(DEFAULTS.preapproveToolAllowlist),
@@ -247,6 +255,8 @@ export interface ResolvedSettings {
   readonly guardIrreversibleDenyFloor: number
   readonly guardInjectionAskThreshold: number
   readonly guardUserRequestedMin: number
+  readonly guardFromUntrustedMin: number
+  readonly untrustedScanEnabled: boolean
   readonly preapproveEnabled: boolean
   readonly preapproveToolAllowlist: ReadonlySet<string>
   readonly preapproveAutoApproveMin: number
@@ -297,6 +307,8 @@ export function resolveSettings(config: Config): ResolvedSettings {
     guardIrreversibleDenyFloor: config.guardIrreversibleDenyFloor ?? DEFAULTS.guardIrreversibleDenyFloor,
     guardInjectionAskThreshold: config.guardInjectionAskThreshold ?? DEFAULTS.guardInjectionAskThreshold,
     guardUserRequestedMin: config.guardUserRequestedMin ?? DEFAULTS.guardUserRequestedMin,
+    guardFromUntrustedMin: config.guardFromUntrustedMin ?? DEFAULTS.guardFromUntrustedMin,
+    untrustedScanEnabled: config.untrustedScanEnabled ?? DEFAULTS.untrustedScanEnabled,
     preapproveEnabled: config.preapproveEnabled ?? DEFAULTS.preapproveEnabled,
     preapproveToolAllowlist: new Set(config.preapproveToolAllowlist ?? DEFAULTS.preapproveToolAllowlist),
     preapproveAutoApproveMin: config.preapproveAutoApproveMin ?? DEFAULTS.preapproveAutoApproveMin,

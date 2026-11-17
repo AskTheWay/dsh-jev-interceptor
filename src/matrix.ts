@@ -23,6 +23,8 @@ export interface GuardAnswers {
   readonly matchesTask: NoulAnswer
   readonly injectionSuspect: NoulAnswer
   readonly userRequested: NoulAnswer
+  /** 来自第 6 问：本调用是否在执行工具结果中被标记的注入指令（缺省 0=无标记）。 */
+  readonly fromUntrusted: NoulAnswer
 }
 
 /** Tunable thresholds consumed by {@link decideGuard}. */
@@ -42,6 +44,11 @@ export interface GuardThresholds {
    * （用户在自己的消息里已确认过该动作）。deny 与注入/不可逆升级永不因它解除。
    */
   readonly userRequestedMin: number
+  /**
+   * 执行注入指令的 deny 门（第 6 问 from_untrusted）：高置信直接拦——除非
+   * 用户同时明确要求过（此时降为 ask：用户可能真的要求了类似操作）。
+   */
+  readonly fromUntrustedMin: number
 }
 
 /** One resolved guard action; `delegate` maps to `next()` in the listener. */
@@ -66,7 +73,7 @@ function p(value: number): string {
  *   matchesTask.noul < 0.5（不利证据）时追加 ` · task=0.12`。
  */
 export function guardEvidence(answers: GuardAnswers): string {
-  const { risk, irreversible, matchesTask, injectionSuspect, userRequested } = answers
+  const { risk, irreversible, matchesTask, injectionSuspect, userRequested, fromUntrusted } = answers
   const parts = [
     `risk=${risk.choice} ${p(risk.probabilities[risk.choice] ?? risk.confidence)}`,
     `irrev=${p(irreversible.noul)}`,
@@ -74,6 +81,7 @@ export function guardEvidence(answers: GuardAnswers): string {
   ]
   if (matchesTask.noul < 0.5) parts.push(`task=${p(matchesTask.noul)}`)
   if (userRequested.noul >= 0.5) parts.push(`user=${p(userRequested.noul)}`)
+  if (fromUntrusted.noul >= 0.5) parts.push(`untrusted=${p(fromUntrusted.noul)}`)
   return parts.join(' · ')
 }
 
@@ -88,6 +96,21 @@ export function decideGuard(answers: GuardAnswers, thresholds: GuardThresholds):
   // 证据摘要统一附在中文结论后；reason 行首的 `jev-guard:` 前缀是安全协议
   // （preapprove 靠它识别并跳过本插件的升级，绝不自动批 guard 的 ask），不可移除。
   const evidence = guardEvidence(answers)
+  const { fromUntrusted } = answers
+  if (fromUntrusted.noul >= thresholds.fromUntrustedMin) {
+    // 间接注入执行（第二腿）：调用在执行此前从工具结果中标记的指令。
+    // 默认 deny（零容忍）；用户明确要求过同类操作时降为 ask 让人裁决。
+    if (userRequested.noul >= thresholds.userRequestedMin) {
+      return {
+        kind: 'ask',
+        reason: `jev-guard: 调用疑似在执行工具结果中标记的注入指令，但用户也要求过同类操作——请人工裁决（${evidence}）。建议：确认这确实是你要求的操作后再批准`,
+      }
+    }
+    return {
+      kind: 'deny',
+      reason: `jev-guard: 拒绝执行工具结果中标记的注入指令（${evidence}）。建议：若这确实是你的明确要求，请在对话中直接说明该操作后重试`,
+    }
+  }
   if (injectionSuspect.noul >= thresholds.injectionAskThreshold) {
     return {
       kind: 'ask',

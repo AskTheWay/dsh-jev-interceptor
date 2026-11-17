@@ -106,7 +106,7 @@ Calibration closes its own loop: every `/jev-calibrate` run snapshots the report
 - **Never `allow`.** "No objection" is expressed as `next()`, so downstream listeners (external hooks, auto-review) keep their veto.
 - **Fail-closed everywhere.** No key / provider cooldown / timeout / parse mismatch / internal error → delegate to stock behavior. The approval service's `never` policy is enforced upstream of every listener, so this plugin structurally cannot relax it.
 - **Evidence-gated auto-approval.** `allowed-once` requires captured argument evidence: only a call the guard escalated (fresh pending entry, matching session and tool) can be auto-approved. Hook asks and sandbox escalations carry no arguments and always go to the human.
-- **Injection-aware.** Tool arguments enter the Jev `state` data field only; `instructions` are fixed strings; a suspected-injection answer *escalates* rather than suppresses. (Jev's maker acknowledges adversarial inputs can sway classifiers — so denial here is an accelerator, never the last line of defense.)
+- **Injection-aware, both legs.** Leg 1: tool arguments enter the Jev `state` data field only and `instructions` are fixed strings; a suspected-injection answer *escalates* rather than suppresses. Leg 2 (v0.10): tool *results* are scanned on post-execute (heuristic pre-filter → Jev confirmation) and flagged directives land in a bounded per-agent mark window; the guard's sixth question (`from_untrusted`) then denies calls that execute a flagged instruction — something a per-call classifier structurally cannot see. A confident `user_requested` cross-check downgrades that deny to a human decision, so defense never blocks what the user actually asked for. (Jev's maker acknowledges adversarial inputs can sway classifiers — so denial here is an accelerator, never the last line of defense.)
 - **Bounded input.** Head+tail argument previews and trailing-message digests — Jev's own guidance is to filter in code and send only what a question needs.
 - **Resilient by construction.** Wall-clock timeout per attempt, single retry on 429/529, cooldown after consecutive failures (timeouts count), concurrency cap, LRU decision cache, queue-bound semaphore. A dead provider costs you zero behavior, not your harness.
 - **Takeover rows disable as a layer.** The `jev-session-reference` row replaces the upstream `session-reference` row; toggling only this row off in the Plugins UI would leave *no* session-reference active. Remove the takeover by disabling the whole `dsh-jev-interceptor` bundle layer (`setBundleEnabled(false)`), which restores the upstream row.
@@ -114,7 +114,7 @@ Calibration closes its own loop: every `/jev-calibrate` run snapshots the report
 - **Observable.** Every decision lands in `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl` (honoring `$DSH_HOME`), with `callId` correlation and full-precision `scores` for calibration replays; the log rotates at 20 MB. `/jev-stats` aggregates per hook, `/jev-log` shows per-decision detail, and the Web panel charts it all.
 - **Calibratable, not guessed.** `/jev-calibrate` replays your shadow telemetry through the *same* decision matrix and suggests threshold moves (±0.05 steps, ≥30 samples for routine moves — ≥10 once a mis-approval danger signal appears, tighten-only; injection thresholds never relaxed, nothing auto-applied).
 
-All of this is enforced by **169 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
+All of this is enforced by **189 tests**, including adversarial-review regression cases (a concurrency leak that could hang the tool pipeline, cross-session callId collisions, evidence-free auto-approval).
 
 ## Configure
 
@@ -158,7 +158,7 @@ The client speaks the plain `state + questions` wire shape shared by TypeSafe di
 ```sh
 npm install --legacy-peer-deps   # devDeps pin a current dsh API generation
 npm run typecheck                # src + tests, against real @deepseek-ai types
-npm test                         # vitest, 169 tests, no network
+npm test                         # vitest, 189 tests, no network
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # one real decision against a live provider
 ```

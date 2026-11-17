@@ -11,7 +11,7 @@ import { appendFile, mkdir, open, readFile, stat, rename } from 'node:fs/promise
 import { dirname, join } from 'node:path'
 
 /** Where a decision came from. */
-export type DecisionTag = 'guard' | 'preapprove' | 'session-reference' | 'approval-loop' | 'stagnation'
+export type DecisionTag = 'guard' | 'preapprove' | 'session-reference' | 'approval-loop' | 'stagnation' | 'untrusted'
 
 /** What the plugin did (or, in shadow mode, would have done). */
 export type DecisionAction =
@@ -26,6 +26,7 @@ export type DecisionAction =
   | 'retention-fifo'
   | 'agreement'
   | 'stagnation-alert'
+  | 'marked'
 
 /** One durable telemetry record. */
 export interface TelemetryEntry {
@@ -415,6 +416,7 @@ const TAG_LABELS: Readonly<Record<string, string>> = {
   'session-reference': '会话保留打分',
   'approval-loop': '审批一致率',
   stagnation: '停滞检测（换参循环）',
+  untrusted: '注入扫描（结果标记）',
 }
 
 /** Action 中文标签 */
@@ -430,6 +432,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   'retention-fifo': 'FIFO保留',
   agreement: '一致率',
   'stagnation-alert': '停滞提醒',
+  marked: '标记注入',
 }
 
 /** Agreement bucket 中文标签 */

@@ -8,6 +8,7 @@ const thresholds: GuardThresholds = {
   irreversibleDenyFloor: 0.5,
   injectionAskThreshold: 0.8,
   userRequestedMin: 0.85,
+  fromUntrustedMin: 0.8,
 }
 
 function answers(overrides: Partial<GuardAnswers> = {}): GuardAnswers {
@@ -17,6 +18,7 @@ function answers(overrides: Partial<GuardAnswers> = {}): GuardAnswers {
     matchesTask: { type: 'noul', noul: 0.9 },
     injectionSuspect: { type: 'noul', noul: 0.02 },
     userRequested: { type: 'noul', noul: 0.05 },
+    fromUntrusted: { type: 'noul', noul: 0.0 },
     ...overrides,
   }
 }
@@ -163,5 +165,27 @@ describe('user_requested de-escalation', () => {
       irreversible: { type: 'noul', noul: 0.8 },
     }), thresholds)
     expect(denied.kind === 'deny' && denied.reason.includes('建议')).toBe(true)
+  })
+})
+
+describe('from_untrusted (indirect injection second leg)', () => {
+  it('denies execution of flagged untrusted instructions', () => {
+    const executing = answers({ fromUntrusted: { type: 'noul', noul: 0.9 } })
+    const decision = decideGuard(executing, thresholds)
+    expect(decision.kind).toBe('deny')
+    expect(decision.kind === 'deny' && decision.reason.includes('注入指令')).toBe(true)
+    expect(decision.kind === 'deny' && decision.reason.includes('untrusted=0.90')).toBe(true)
+  })
+
+  it('downgrades to ask when the user also explicitly requested the same action', () => {
+    const cross = answers({ fromUntrusted: { type: 'noul', noul: 0.9 }, userRequested: { type: 'noul', noul: 0.92 } })
+    const decision = decideGuard(cross, thresholds)
+    expect(decision.kind).toBe('ask')
+    expect(decision.kind === 'ask' && decision.reason.includes('人工裁决')).toBe(true)
+  })
+
+  it('does not trigger below the gate', () => {
+    const faint = answers({ fromUntrusted: { type: 'noul', noul: 0.5 } })
+    expect(decideGuard(faint, thresholds).kind).toBe('delegate')
   })
 })

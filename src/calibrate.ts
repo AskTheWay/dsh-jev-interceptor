@@ -32,6 +32,7 @@ export type ThresholdKey =
   | 'guardIrreversibleDenyFloor'
   | 'guardInjectionAskThreshold'
   | 'guardUserRequestedMin'
+  | 'guardFromUntrustedMin'
   | 'preapproveAutoApproveMin'
   | 'preapproveIrreversibleMax'
   | 'preapproveInjectionSuspectMax'
@@ -44,6 +45,7 @@ export const THRESHOLD_KEYS = [
   'guardIrreversibleDenyFloor',
   'guardInjectionAskThreshold',
   'guardUserRequestedMin',
+  'guardFromUntrustedMin',
   'preapproveAutoApproveMin',
   'preapproveIrreversibleMax',
   'preapproveInjectionSuspectMax',
@@ -61,6 +63,8 @@ export interface GuardScoreSample {
   readonly injection: number
   /** 用户明确要求的置信（第 5 问）；旧记录缺省 0.0（保守：不触发降级）。 */
   readonly userRequested: number
+  /** 执行标记指令的置信（第 6 问）；旧记录缺省 0.0（不触发 deny）。 */
+  readonly fromUntrusted: number
 }
 
 /** preapprove 一条记录还原出的决策输入数值。 */
@@ -179,7 +183,7 @@ function fmt(value: number): string {
 
 // ── 旧格式 detail 解析（scores 字段存在前的记录回退路径）────────────────
 
-const GUARD_DETAIL_RE = /^risk=(low|medium|high) p=(\d+(?:\.\d+)?) irrev=(\d+(?:\.\d+)?) task=(\d+(?:\.\d+)?) inj=(\d+(?:\.\d+)?)(?: user=(\d+(?:\.\d+)?))?/
+const GUARD_DETAIL_RE = /^risk=(low|medium|high) p=(\d+(?:\.\d+)?) irrev=(\d+(?:\.\d+)?) task=(\d+(?:\.\d+)?) inj=(\d+(?:\.\d+)?)(?: user=(\d+(?:\.\d+)?))?(?: untrusted=(\d+(?:\.\d+)?))?/
 
 /**
  * 解析旧格式 guard detail（answerDetail 生成的「risk=medium p=0.78 irrev=0.10 task=0.90 inj=0.02」）。
@@ -196,6 +200,7 @@ export function parseGuardDetail(detail: string | undefined): GuardScoreSample |
     taskMatch: Number(m[4]),
     injection: Number(m[5]),
     userRequested: m[6] === undefined ? 0.0 : Number(m[6]),
+    fromUntrusted: m[7] === undefined ? 0.0 : Number(m[7]),
   }
 }
 
@@ -215,7 +220,7 @@ export function parsePreapproveDetail(detail: string | undefined): PreapproveSco
 // ── 样本提取（scores 全精度优先，旧记录回退 detail）──────────────────────
 
 /** scores 数值键表（与 detail token 同名；写入侧见 guard.ts / preapprove.ts）。 */
-const GUARD_SCORE_KEYS = ['risk_p', 'irrev', 'task', 'inj', 'user'] as const
+const GUARD_SCORE_KEYS = ['risk_p', 'irrev', 'task', 'inj', 'user', 'untrusted'] as const
 const PREAPPROVE_SCORE_KEYS = ['scope', 'reversible', 'inj'] as const
 
 /** scores 里全部键都 present 且落在 [0,1] 才可用。 */
@@ -249,6 +254,7 @@ export function guardSampleOf(entry: TelemetryEntry): GuardScoreSample | undefin
         taskMatch: scores['task'],
         injection: scores['inj'],
         userRequested: scores['user'],
+        fromUntrusted: scores['untrusted'],
       }
     }
   }
@@ -280,6 +286,7 @@ function guardAnswersOf(sample: GuardScoreSample): GuardAnswers {
     matchesTask: { type: 'noul', noul: sample.taskMatch },
     injectionSuspect: { type: 'noul', noul: sample.injection },
     userRequested: { type: 'noul', noul: sample.userRequested },
+    fromUntrusted: { type: 'noul', noul: sample.fromUntrusted },
   }
 }
 
@@ -292,6 +299,7 @@ function guardThresholdsOf(t: ThresholdsInput): GuardThresholds {
     irreversibleDenyFloor: t.guardIrreversibleDenyFloor,
     injectionAskThreshold: t.guardInjectionAskThreshold,
     userRequestedMin: t.guardUserRequestedMin,
+    fromUntrustedMin: t.guardFromUntrustedMin,
   }
 }
 
@@ -494,7 +502,7 @@ export function calibrate(entries: readonly TelemetryEntry[], current: Threshold
   // 旧格式 = 已答调用但缺 scores 字段（detail 回退解析，数值精度 0.01）。
   const hasLegacySamples
     = guardEntries.some(e => e.action !== 'degraded'
-      && (e.scores === undefined || typeof e.scores['user'] !== 'number'))
+      && (e.scores === undefined || typeof e.scores['user'] !== 'number' || typeof e.scores['untrusted'] !== 'number'))
       || preapproveEntries.some(e => e.scores === undefined && e.action !== 'degraded')
   const guard = guardSamples.filter((s): s is GuardScoreSample => s !== undefined)
 
