@@ -10,6 +10,7 @@
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { translate, type Locale, type MessageKey } from './localization.js'
 import type { CalibrationReport, ThresholdKey, ThresholdsInput } from './calibrate.js'
 
 /** 可比对的阈值参数（与 ThresholdsInput 同键）。 */
@@ -178,13 +179,13 @@ export function compareWithPrevious(
   return { previousTs: previous.ts, adopted, ignored, manual, bucketsDelta, incomparable }
 }
 
-/** 桶名的中文短标签（渲染对比段用）。 */
-const BUCKET_LABELS: Readonly<Record<string, string>> = {
-  'would-over-approve': '误批风险',
-  'aligned-approve': '一致批',
-  'aligned-reject': '一致拒',
-  'friction-human-approved': '多余人工',
-  neutral: '中性',
+/** 桶名的短标签键（渲染对比段用）。 */
+const BUCKET_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
+  'would-over-approve': 'msg.bucketWouldOverApprove',
+  'aligned-approve': 'msg.bucketAlignedApprove',
+  'aligned-reject': 'msg.bucketAlignedReject',
+  'friction-human-approved': 'msg.bucketFrictionHumanApproved',
+  neutral: 'msg.bucketNeutral',
 }
 
 /**
@@ -201,36 +202,41 @@ export function shouldAppend(previous: CalibrationSnapshot | undefined, next: Ca
 }
 
 /**
- * 渲染历史对比段（不含 ``` 围栏，由 renderCalibration 拼接）。
- * @param comparison - compareWithPrevious 的输出。
- * @returns 中文行数组；无历史时为空数组。
+ * Render the previous-run comparison section (no fence; renderCalibration wraps it).
+ * @param comparison - compareWithPrevious output.
+ * @param locale - report language (default Chinese for legacy callers).
+ * @returns report lines.
  */
-export function renderComparisonLines(comparison: CalibrationComparison): string[] {
+export function renderComparisonLines(comparison: CalibrationComparison, locale: Locale = 'zh'): string[] {
+  const t = (key: MessageKey, values?: Record<string, string | number>): string => translate(locale, key, values)
   if (comparison.previousTs === undefined) {
-    return ['📭 暂无历史：这是第一份校准报告，下次运行会对比本次建议的采纳情况']
+    return [t('msg.historyNone')]
   }
   const lines: string[] = []
-  lines.push(`🕘 与上次对比（${comparison.previousTs.slice(0, 16).replace('T', ' ')} → 本次）`)
+  lines.push(t('msg.historyTitle', { v0: comparison.previousTs.slice(0, 16).replace('T', ' ') }))
   if (comparison.adopted.length === 0 && comparison.ignored.length === 0 && comparison.manual.length === 0) {
-    lines.push('   上次没有数值建议（本次是采纳判断的第一份带建议报告）')
+    lines.push(t('msg.historyNoAdvice'))
   }
   for (const item of comparison.adopted) {
-    lines.push(`   ✓ 已采纳 ${item.param}（${item.now.toFixed(2)}）`)
+    lines.push(t('msg.historyAdopted', { v0: item.param, v1: item.now.toFixed(2) }))
   }
   for (const item of comparison.ignored) {
-    lines.push(`   · 未采纳 ${item.param}：建议 ${item.suggested.toFixed(2)}，仍为 ${item.now.toFixed(2)}`)
+    lines.push(t('msg.historyIgnored', { v0: item.param, v1: item.suggested.toFixed(2), v2: item.now.toFixed(2) }))
   }
   for (const item of comparison.manual) {
-    lines.push(`   ↔ 已手动改 ${item.param}：建议 ${item.suggested.toFixed(2)}，现为 ${item.now.toFixed(2)}`)
+    lines.push(t('msg.historyManual', { v0: item.param, v1: item.suggested.toFixed(2), v2: item.now.toFixed(2) }))
   }
   if (comparison.incomparable) {
-    lines.push('   一致率桶变化：窗口口径不同（--all 与默认尾窗），不可比')
+    lines.push(t('msg.historyIncomparable'))
   } else {
     const deltaEntries = Object.entries(comparison.bucketsDelta)
     if (deltaEntries.length > 0) {
-      const parts = deltaEntries.map(([bucket, delta]) =>
-        `${BUCKET_LABELS[bucket] ?? bucket} ${delta > 0 ? `+${String(delta)}` : String(delta)}`)
-      lines.push(`   一致率桶变化：${parts.join(' · ')}（窗口累计口径）`)
+      const parts = deltaEntries.map(([bucket, delta]) => {
+        const key = BUCKET_LABEL_KEYS[bucket]
+        const bucketLabel = key === undefined ? bucket : t(key)
+        return `${bucketLabel} ${delta > 0 ? `+${String(delta)}` : String(delta)}`
+      })
+      lines.push(t('msg.historyBuckets', { v0: parts.join(' · ') }))
     }
   }
   return lines

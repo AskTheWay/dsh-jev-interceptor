@@ -23,6 +23,8 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { PostToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { decideStagnation, type StagnationAnswers } from './matrix.js'
+import { translate } from './localization.js'
+import type { Locale } from './localization.js'
 import type { LiveSettings } from './config.js'
 import type { JevClient } from './jev.js'
 import { noul, type JevAnswers, type JevQuestion } from './types.js'
@@ -180,6 +182,8 @@ function extractStagnationAnswers(answers: JevAnswers): StagnationAnswers | unde
 export interface StagnationDeps {
   /** Live settings read once per event: runtime toggles take effect immediately. */
   readonly live: () => LiveSettings
+  /** Language of the injected notice, resolved per event. */
+  readonly locale: () => Locale
   readonly tracker: StagnationTracker
   readonly thresholds: StagnationThresholds
   /** 双 noul 行动置信门（stagnationConfidenceMin）。 */
@@ -198,16 +202,18 @@ export interface StagnationDeps {
  * 的 kind，类型侧断言、运行时消费端按未知 kind 回退为普通内容展示。
  * summary 经 boundContextSummary 绑 120 字符上限。
  */
-function buildReminder(tool: string, attempts: readonly AttemptRecord[], confidence: number): UserMessage {
-  const text = `工具 ${tool} 已连续 ${String(attempts.length)} 次以不同参数失败，且失败模式相似、无进展迹象`
-    + `（Jev 停滞判定，置信 ${confidence.toFixed(2)}）。当前策略疑似换参数死循环。`
-    + '请停下来：重新阅读错误信息、换一条完全不同的解决路径，或向用户说明困难——不要继续微调参数重试。'
+function buildReminder(tool: string, attempts: readonly AttemptRecord[], confidence: number, locale: Locale): UserMessage {
+  const text = translate(locale, 'msg.stagnationNotice', {
+    v0: tool,
+    v1: attempts.length,
+    v2: confidence.toFixed(2),
+  })
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: {
       kind: 'dsh-jev-interceptor',
       form: 'notice',
-      summary: boundContextSummary(`${tool} 连续 ${String(attempts.length)} 次换参失败（疑似停滞）`),
+      summary: boundContextSummary(translate(locale, 'msg.stagnationSummary', { v0: tool, v1: attempts.length })),
     } as unknown as UserMessage['source'],
   })
 }
@@ -307,7 +313,10 @@ export function createStagnationListener(deps: StagnationDeps): {
         // shadow 模式只记遥测不注入（照 guard/preapprove 的 would-have 语义）。
         if (observed.mode === 'enforce') {
           deps.tracker.noteAlert(observed.target.agent, observed.target.tool, now())
-          return prependContext(downstream, buildReminder(observed.target.tool, observed.target.attempts, judged.confidence))
+          return prependContext(
+            downstream,
+            buildReminder(observed.target.tool, observed.target.attempts, judged.confidence, deps.locale()),
+          )
         }
         return downstream
       } catch {

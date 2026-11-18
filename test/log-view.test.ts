@@ -77,6 +77,17 @@ describe('renderLogTable', () => {
     expect(text).toContain('最近 2 条')
   })
 
+  it('localizes the injection scan in the table without changing export IDs', () => {
+    const scan = entry({ tag: 'untrusted', action: 'marked' })
+    const text = renderLogTable([scan], undefined, 'en')
+    expect(text).toContain('scan')
+    expect(text).toContain('flagged')
+    expect(text).not.toMatch(/\p{Script=Han}/u)
+    expect(JSON.parse(toLogJson([scan]))).toEqual([scan])
+    expect(toLogCsv([scan])).toContain(',untrusted,')
+    expect(toLogCsv([scan])).toContain(',marked,')
+  })
+
   it('optionally footers the full-log path', () => {
     expect(renderLogTable([entry()], '/home/u/.dsh/plugins/dsh-jev-interceptor/telemetry.jsonl')).toContain('全量:')
   })

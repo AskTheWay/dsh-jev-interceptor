@@ -76,11 +76,15 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-layout": "^0.2.2-rc.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.2-rc.3",
     "@deepseek-ai/dsh-commands": "0.2.2-rc.3",
     "@deepseek-ai/dsh-compaction": "0.2.2-rc.3",
     "@deepseek-ai/dsh-credentials": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-error": "0.2.2-rc.3",
     "@deepseek-ai/dsh-home-paths": "0.2.2-rc.3",
     "@deepseek-ai/dsh-launch-environment": "0.2.2-rc.3",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
@@ -99,8 +103,7 @@
     "react": "^19.3.1",
     "tsdown": "^0.23.1",
     "typescript": "^5.8.0",
-    "vitest": "^3.0.0",
-    "@deepseek-ai/dsh-error": "0.2.2-rc.3"
+    "vitest": "^3.0.0"
   },
   "author": "AskTheWay",
   "repository": {

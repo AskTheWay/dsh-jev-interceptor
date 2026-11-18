@@ -111,4 +111,14 @@ describe('renderImpact', () => {
   it('renders the empty-window placeholder', () => {
     expect(renderImpact(summarizeImpact([]))).toContain('暂无数据')
   })
+
+  it('renders the English narrative when asked', () => {
+    const text = renderImpact(summarizeImpact([
+      entry({ tag: 'preapprove', action: 'auto-approve', mode: 'enforce' }),
+    ]), 'en')
+    expect(text).toContain('impact attribution')
+    expect(text).toContain('approvals saved')
+    expect(text).toContain('In one line')
+    expect(text).not.toMatch(/\p{Script=Han}/u)
+  })
 })
