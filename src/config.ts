@@ -7,6 +7,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import type { LocaleSetting } from './host-locale.js'
 
 /**
  * Complete plugin configuration, validated by the same-named schema.
@@ -21,6 +22,11 @@ export interface Config {
   enabled?: boolean
   /** `shadow` (default) records would-be decisions only; `enforce` acts on them. */
   mode?: 'shadow' | 'enforce'
+  /**
+   * 消息语言：`auto`（默认，跟随 GUI 的语言选择）、`en` 或 `zh`。
+   * 只影响本插件生成给用户的文本（审批理由、提醒、命令与报告输出）。
+   */
+  locale?: LocaleSetting
   /** Which Jev entry point to call: typesafe (官方) / openrouter / custom. */
   provider?: 'typesafe' | 'openrouter' | 'custom'
   /** 自定义 endpoint URL（provider 为 custom 时必填）. */
@@ -86,6 +92,14 @@ export interface Config {
   guardFromUntrustedMin?: number
   /** 工具结果注入扫描（post-execute 两层扫描 + 标记窗口；default on）。 */
   untrustedScanEnabled?: boolean
+  /**
+   * Decide the guard's own escalations without a human (default off).
+   * When on, guard escalations whose risk came back low or medium and that are
+   * not injection-suspicion asks are answered `allowed-once`; high-risk asks
+   * and injection-suspicion asks are answered `rejected`. The human prompt is
+   * removed for both outcomes — enable only when that autonomy is accepted.
+   */
+  autoApproveNonHighRiskCalls?: boolean
 
   /** Pre-approval hook master switch (default on when the plugin is enabled). */
   preapproveEnabled?: boolean
@@ -137,6 +151,7 @@ const DEFAULT_READ_ONLY_TOOLS = ['read', 'read_image', 'grep', 'glob', 'todo_wri
 export const DEFAULTS = {
   enabled: false,
   mode: 'shadow' as const,
+  locale: 'auto' as const,
   provider: 'typesafe' as const,
   apiKeyEnv: 'TYPESAFE_API_KEY',
   timeoutMs: 1500,
@@ -163,6 +178,7 @@ export const DEFAULTS = {
   guardUserRequestedMin: 0.85,
   guardFromUntrustedMin: 0.8,
   untrustedScanEnabled: true,
+  autoApproveNonHighRiskCalls: false,
   preapproveEnabled: true,
   preapproveToolAllowlist: [] as string[],
   preapproveAutoApproveMin: 0.85,
@@ -180,6 +196,8 @@ export const DEFAULTS = {
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(DEFAULTS.enabled),
   mode: z.union(['shadow', 'enforce']).default(DEFAULTS.mode),
+  locale: z.union(['auto', 'en', 'zh']).default(DEFAULTS.locale)
+    .description('Message language: auto follows the GUI language; en/zh pin it'),
   provider: z.union(['typesafe', 'openrouter', 'custom']).default(DEFAULTS.provider),
   endpoint: z.string(),
   model: z.string(),
@@ -209,6 +227,8 @@ export const Config: z<Config> = z.object({
   guardUserRequestedMin: z.number().min(0).max(1).default(DEFAULTS.guardUserRequestedMin),
   guardFromUntrustedMin: z.number().min(0).max(1).default(DEFAULTS.guardFromUntrustedMin),
   untrustedScanEnabled: z.boolean().default(DEFAULTS.untrustedScanEnabled),
+  autoApproveNonHighRiskCalls: z.boolean().default(DEFAULTS.autoApproveNonHighRiskCalls)
+    .description('Decide the guard\'s own escalations: approve non-high-risk, reject high-risk/injection (DANGEROUS)'),
 
   preapproveEnabled: z.boolean().default(DEFAULTS.preapproveEnabled),
   preapproveToolAllowlist: z.array(z.string()).default(DEFAULTS.preapproveToolAllowlist),
@@ -234,6 +254,7 @@ export const Config: z<Config> = z.object({
 /** Fully-defaulted settings, the one resolved shape the rest of the plugin consumes. */
 export interface ResolvedSettings {
   readonly mode: 'shadow' | 'enforce'
+  readonly locale: LocaleSetting
   readonly timeoutMs: number
   readonly cooldownMs: number
   readonly failureThreshold: number
@@ -257,6 +278,7 @@ export interface ResolvedSettings {
   readonly guardUserRequestedMin: number
   readonly guardFromUntrustedMin: number
   readonly untrustedScanEnabled: boolean
+  readonly autoApproveNonHighRiskCalls: boolean
   readonly preapproveEnabled: boolean
   readonly preapproveToolAllowlist: ReadonlySet<string>
   readonly preapproveAutoApproveMin: number
@@ -280,6 +302,7 @@ export interface ResolvedSettings {
 export function resolveSettings(config: Config): ResolvedSettings {
   return {
     mode: config.mode ?? DEFAULTS.mode,
+    locale: config.locale ?? DEFAULTS.locale,
     // timeoutMs 未显式配置时跟随 provider：TypeSafe 直连 ~1s 内，OpenRouter 代理 ~3s。
     timeoutMs: config.timeoutMs
       ?? (config.provider === 'openrouter' ? DEFAULTS.openrouterTimeoutMs : DEFAULTS.timeoutMs),
@@ -309,6 +332,7 @@ export function resolveSettings(config: Config): ResolvedSettings {
     guardUserRequestedMin: config.guardUserRequestedMin ?? DEFAULTS.guardUserRequestedMin,
     guardFromUntrustedMin: config.guardFromUntrustedMin ?? DEFAULTS.guardFromUntrustedMin,
     untrustedScanEnabled: config.untrustedScanEnabled ?? DEFAULTS.untrustedScanEnabled,
+    autoApproveNonHighRiskCalls: config.autoApproveNonHighRiskCalls ?? DEFAULTS.autoApproveNonHighRiskCalls,
     preapproveEnabled: config.preapproveEnabled ?? DEFAULTS.preapproveEnabled,
     preapproveToolAllowlist: new Set(config.preapproveToolAllowlist ?? DEFAULTS.preapproveToolAllowlist),
     preapproveAutoApproveMin: config.preapproveAutoApproveMin ?? DEFAULTS.preapproveAutoApproveMin,

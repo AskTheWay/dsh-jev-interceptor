@@ -55,6 +55,7 @@ async function makeDeps(overrides: Partial<Omit<PreapproveDeps, 'live'>> & { liv
   const live: LiveSettings = { enabled: true, mode: 'enforce' }
   return {
     live: () => ({ ...live }),
+    locale: () => 'zh',
     allowlist: (): Set<string> => new Set(['bash']),
     thresholds: () => ({
       autoApproveMin: 0.85,

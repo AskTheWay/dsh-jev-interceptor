@@ -24,6 +24,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import type { PreToolDecision, ToolErrorInfo, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { decideGuard, type GuardAction, type GuardThresholds } from './matrix.js'
+import type { Locale } from './localization.js'
 import type { LiveSettings } from './config.js'
 import type { JevClient } from './jev.js'
 import { choice, noul, type ChoiceAnswer, type JevAnswers, type JevQuestion, type NoulAnswer } from './types.js'
@@ -35,6 +36,13 @@ import type { Telemetry } from './telemetry.js'
 export interface PendingAsk {
   readonly tool: string
   readonly argsPreview: string
+  /**
+   * What an unattended `autoApproveNonHighRiskCalls` answerer does with this
+   * escalation, frozen at classification time: `approve` for below-high-risk,
+   * non-injection asks, `deny` for high-risk and injection-suspicion asks.
+   * Everything else ignores it and still asks the human. Absent means "ask".
+   */
+  readonly autoDecision?: 'approve' | 'deny'
   readonly createdAt: number
 }
 
@@ -90,6 +98,8 @@ export class PendingAsks {
 export interface GuardDeps {
   /** Live settings read once per event: runtime toggles take effect immediately. */
   readonly live: () => LiveSettings
+  /** Language of every user-facing reason, resolved per event (the GUI language can change live). */
+  readonly locale: () => Locale
   readonly readOnlyTools: ReadonlySet<string>
   readonly excludeTools: ReadonlySet<string>
   /**
@@ -298,7 +308,8 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
     })
     return undefined
   }
-  const action = decideGuard(extracted, deps.thresholds())
+  const thresholds = deps.thresholds()
+  const action = decideGuard(extracted, thresholds, deps.locale())
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'guard',
@@ -323,11 +334,17 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
       untrusted: extracted.fromUntrusted.noul,
     },
   })
-  // Stash the bounded argument preview for the pre-approval question.
+  // Stash the bounded argument preview for the pre-approval question, plus the
+  // frozen unattended verdict for the optional auto-decider: high risk and
+  // injection-suspicion escalations are denied, everything else is approved.
   if (action.kind === 'ask' || action.kind === 'deny') {
+    const dangerous = extracted.risk.choice === 'high'
+      || extracted.injectionSuspect.noul >= thresholds.injectionAskThreshold
+      || extracted.fromUntrusted.noul >= thresholds.fromUntrustedMin
     deps.pendingAsks.set(session.id, exec.callId, {
       tool: exec.name,
       argsPreview: state.args_preview,
+      autoDecision: dangerous ? 'deny' : 'approve',
     })
   }
   return action

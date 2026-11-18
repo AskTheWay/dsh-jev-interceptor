@@ -23,7 +23,7 @@
   <img src="imgs/image-5.png" width="32%" alt="设置：Provider 与连接测试">
 </p>
 
-> Web 面板（侧栏 ⚡ → Jev 决策）：实时 KPI 与净收益卡、可筛选的决策明细（每行带完整证据）、跟踪采纳情况的影子阈值建议、一键连接测试。以上全部是真实插件跑真实决策的截图。
+> Web 面板（侧栏 ⚡ → Jev 决策）：实时 KPI 与净收益卡、可筛选的决策明细（每行带完整证据）、跟踪采纳情况的影子阈值建议、一键连接测试。以上全部是真实插件跑真实决策的截图。 点击刷新旁的 English / 中文按钮可切换 GUI 语言——面板与本插件生成的所有消息（审批理由、停滞提醒、命令报告）会一起切换，因为 Host 会持久化该选择，插件的服务端读到的是同一个偏好。首次访问没有已保存偏好时使用浏览器语言（不支持的语言回退到英语）。
 
 **一口气说完它做什么：** 工具调用执行前，Jev 用一次约 $0.00002 的请求完成风险、可逆性、任务匹配度、注入嫌疑四重分类——高置信高危直接拒绝，中风险升级人工，明确授权且可逆的不再浪费你点审批弹窗。而当 `@` 引用旧会话注入快照时，Jev 逐消息给它对当前任务的价值打分——**让错误堆栈活过字节预算，而不是最旧的那句寒暄**。任何存疑、超时、没 key，都降级回 dsh 原生行为。不需要配置任何"退路"，也绝无放宽权限的可能。
 
@@ -64,6 +64,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
   config:
     enabled: true
     mode: shadow            # 先观察模式：记录每个决策，不执行任何干预
+    locale: auto            # 消息语言：auto 跟随 GUI | en | zh
+    autoApproveNonHighRiskCalls: false  # 危险：常规升级自动批准，危险升级自动拒绝
     provider: typesafe      # 或 'openrouter'（今天就能用，无需候补）| 'custom'
 ```
 
@@ -106,7 +108,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **永不返回 `allow`。** "无异议"用 `next()` 表达，链上后续 listener（外部 hook、auto-review）的否决权完好无损。
 - **处处 fail-closed。** 无 key / provider 冷却 / 超时 / 解析不匹配 / 内部错误 → 委托回原生行为。审批服务的 `never` 策略在任何 listener 之前执行，本插件在结构上就无法放宽它。
 - **证据门控的自动批准。** `allowed-once` 必须有参数证据：只有 guard 升级过的调用（新鲜条目、会话与工具都匹配）才可能被自动批；hook 请求与沙箱提级不携带参数，一律转人工。
-- **注入感知（两腿联防）。** 第一腿：工具参数只进 Jev `state` 数据字段、`instructions` 是固定文案；疑似注入的答案触发*升级*而非压制。第二腿（v0.10）：工具*结果*在 post-execute 被扫描（启发式预筛 → Jev 确认），确认的注入指令进入有界 per-agent 标记窗口；守门人第 6 问（`from_untrusted`）据此拒绝执行被标记指令的调用——这是逐调用分类器结构性看不见的。高置信 `user_requested` 交叉证据会把该拒绝降为人工裁决：防御永不挡住用户真正要求的事。（Jev 官方承认可被对抗内容影响——所以本插件的拦截是加速器，永远不是最后防线。）
+- **可选的"一概同意"（危险，默认关闭）。** 在 `enforce` 模式下，`autoApproveNonHighRiskCalls` 可无人值守地处理 guard 自己的审批请求：*非高风险、非注入嫌疑*的请求批准为 `allowed-once`，高风险或疑似注入的请求返回 `rejected`。上游 `never` 策略与证据门仍照常执行。
+- **注入感知（两腿联防）。** 第一腿：工具参数只进 Jev `state` 数据字段、`instructions` 是固定文案；疑似注入的答案触发*升级*而非压制。第二腿（v0.10）：工具*结果*在 post-execute 被扫描（启发式预筛 → Jev 确认），确认的注入指令进入有界 per-agent 标记窗口；守门人第 6 问（`from_untrusted`）据此拒绝执行被标记指令的调用——这是逐调用分类器结构性看不见的。若 `user_requested` 提供高置信度的交叉证据，守门人会把直接拒绝改为发起审批请求。（Jev 官方承认可被对抗内容影响——所以本插件的拦截是加速器，永远不是最后防线。）
 - **输入限界。** 参数头尾预览 + 尾部消息摘要——Jev 官方指引就是"代码先过滤，只发问题需要的字段"。
 - **构造级韧性。** 每次尝试墙钟超时、429/529 单次重试、连续失败进冷却（超时也计数）、并发上限、LRU 决策缓存、排队有界的信号量。provider 挂掉的代价是零行为差异，不是你的 harness。
 - **接管行按层禁用。** `jev-session-reference` 行替换了上游 `session-reference` 行；在 Plugins 页单独关掉这一行会落得*没有任何* session-reference 在运行。移除接管请禁用整个 `dsh-jev-interceptor` bundle 层（`setBundleEnabled(false)`），上游行随之恢复。
@@ -114,7 +117,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - **可观测。** 每个决策落入 `<dsh-home>/plugins/dsh-jev-interceptor/telemetry.jsonl`（遵循 `$DSH_HOME`），带 `callId` 关联与供校准重放的全精度 `scores` 数值；日志超 20MB 自动轮转。`/jev-stats` 按挂点汇总、`/jev-log` 看单条明细、Web 面板全部图表化。
 - **校准而非拍脑袋。** `/jev-calibrate` 把影子遥测喂给*同一个*决策矩阵做反事实重放，输出阈值调整建议（±0.05 步长、常规建议 ≥30 样本——出现误批危险信号时 ≥10 条即建议收紧，仅收紧方向；注入阈值永不放松、绝不自动应用）。
 
-以上全部由 **189 个测试**锁定，包括对抗评审的回归用例（曾可能挂死工具管线的并发泄漏、跨会话 callId 碰撞、无证据自动批准）。
+测试套件包含对抗评审中的回归用例，覆盖可能挂死工具管线的并发泄漏、跨会话 `callId` 碰撞和无证据自动批准。
 
 ## 配置
 
@@ -158,7 +161,7 @@ OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用�
 ```sh
 npm install --legacy-peer-deps   # devDeps 钉在当前一代 dsh API
 npm run typecheck                # src + tests，对真实 @deepseek-ai 类型
-npm test                         # vitest，189 个测试，无需网络
+npm test                         # vitest，无需网络
 npm run build                    # tsc -> lib/
 node scripts/smoke.mjs           # 对真实 provider 跑一次决策
 ```

@@ -1,24 +1,17 @@
-/**
- * Jev 侧栏面板图标：动态状态徽章。
- *
- * 侧栏架构没有自由内容区（中段归 ui-workspace 的会话列表），完整明细与
- * 校准报告住在主面板；这个图标位是侧栏唯一由插件渲染的常驻位——把它
- * 做成活的状态灯：⚡ + 状态点（绿=运行 / 灰=停用 / 黄=最近有降级），
- * 悬停 title 带轻量摘要。数据自取（status + stats），30s 轮询；拉取失败
- * 静默退化为无状态点（UI 版 fail-closed，绝不闪红干扰）。
- */
+/** Sidebar status icon: green for enabled, gray for disabled, yellow for recent fallback. Poll status and statistics every 30 seconds; on failure, omit the indicator quietly. */
 
+import { t, useLocale } from './i18n.js'
 import { useEffect, useState } from 'react'
 
-/** 侧栏图标 owner props 的本地镜像（上游 SidebarPanelIconOwnerProps）。 */
+/** Local mirror of the upstream SidebarPanelIconOwnerProps. */
 interface PanelIconProps {
-  /** 请求的方形边长像素。 */
+  /** Requested square size in pixels. */
   readonly size?: number
-  /** 该面板当前是否被选中。 */
+  /** Whether this panel is selected. */
   readonly active?: boolean
 }
 
-/** 徽章数据（status + stats 的轻量合并）。 */
+/** Lightweight combined status and statistics for the badge. */
 interface IconBadge {
   readonly enabled: boolean
   readonly mode: 'shadow' | 'enforce'
@@ -26,10 +19,11 @@ interface IconBadge {
   readonly calls: number
 }
 
-/** 轮询间隔：状态灯不需要秒级新鲜度。 */
+/** The status indicator does not require second-by-second polling. */
 const POLL_MS = 30_000
 
 export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): React.JSX.Element {
+  useLocale()
   const [badge, setBadge] = useState<IconBadge | null>(null)
 
   useEffect(() => {
@@ -51,7 +45,7 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
         }
         if (!cancelled) setBadge({ enabled: s.enabled, mode: s.mode, degraded, calls })
       } catch {
-        // 静默：徽章退化为无状态点。
+        // Quietly omit the indicator when polling fails.
       }
     }
     void pull()
@@ -62,19 +56,18 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
     }
   }, [])
 
-  // 状态点走官方主题变量：深色/浅色主题下都能与背景环形成对比。
+  // Official theme tokens keep the indicator distinct from its background ring.
   const dot = badge === null
     ? undefined
     : !badge.enabled ? 'var(--dsw-alias-label-secondary,#8a8a8a)'
       : badge.degraded > 0 ? 'var(--dsw-alias-state-warn-primary,#d97706)'
         : 'var(--dsw-alias-state-success-primary,#16a34a)'
-  const title = badge === null ? 'Jev 决策'
-    : 'Jev 决策 · '
-      + (badge.enabled
-        ? (badge.mode === 'shadow' ? '运行中（观察）' : '运行中（执行）')
-        : '已停用')
-      + ` · 统计窗口 ${String(badge.calls)} 次决策`
-      + (badge.degraded > 0 ? ` · ${String(badge.degraded)} 次降级` : '')
+  const title = t('panel.jevDecisions') + (badge === null ? '' : ' · '
+    + (badge.enabled
+      ? t(badge.mode === 'shadow' ? 'panel.runningShadowMode' : 'panel.runningEnforceMode')
+      : t('panel.disabled'))
+    + ' · ' + t('panel.totalDecisions') + ': ' + String(badge.calls)
+    + (badge.degraded > 0 ? ' · ' + t('panel.fallbacks', { v0: String(badge.degraded) }) : ''))
   const dotSize = Math.max(6, Math.round(size * 0.33))
 
   return (
@@ -89,7 +82,7 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
       <span style={{
         fontSize: Math.round(size * 0.72),
         lineHeight: '1',
-        // 停用或未选中时整体降饱和，让状态点成为唯一强信号。
+        // Desaturate inactive icons so the status indicator remains prominent.
         opacity: badge !== null && !badge.enabled ? 0.45 : active ? 1 : 0.8,
         filter: active ? 'none' : 'grayscale(30%)',
       }}>⚡</span>

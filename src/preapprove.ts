@@ -23,6 +23,7 @@
 import type {} from '@deepseek-ai/dsh-agent'
 import type { ApprovalOutcome, ApprovalRequestEvent } from '@deepseek-ai/dsh-user-approval/types'
 import { decidePreapprove, type PreapproveThresholds, type PreapproveVerdict } from './matrix.js'
+import type { Locale } from './localization.js'
 import type { LiveSettings } from './config.js'
 import type { JevClient } from './jev.js'
 import { noul, type JevAnswers, type JevQuestion, type NoulAnswer } from './types.js'
@@ -35,7 +36,9 @@ import type { ApprovalTrace } from './approval-loop.js'
 export interface PreapproveDeps {
   /** Live settings read once per event: runtime toggles take effect immediately. */
   readonly live: () => LiveSettings
-  /** 每事件读取的允许名单（函数）：面板/命令更新名单后下一个审批请求即生效。 */
+  /** Language of the human-facing verdict reason, resolved per event. */
+  readonly locale: () => Locale
+  /** Per-event allowlist read: panel/command updates apply on the next approval request. */
   readonly allowlist: () => ReadonlySet<string>
   /** 每事件读取的阈值（函数）：热更新后下一个调用即生效。 */
   readonly thresholds: () => PreapproveThresholds
@@ -170,7 +173,7 @@ async function evaluatePreapprove(
     })
     return undefined
   }
-  const verdict = decidePreapprove(extracted, deps.thresholds())
+  const verdict = decidePreapprove(extracted, deps.thresholds(), deps.locale())
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'preapprove',

@@ -129,6 +129,7 @@ function harness(options: {
   mode?: 'shadow' | 'enforce'
   classify?: () => Promise<ClassifyResult | null>
   recordThrows?: boolean
+  locale?: 'zh' | 'en'
 } = {}): Harness {
   const tracker = new StagnationTracker(8)
   const entries: TelemetryEntry[] = []
@@ -148,6 +149,7 @@ function harness(options: {
   const live: LiveSettings = { enabled: true, mode: options.mode ?? 'enforce' }
   const { onPostExecute } = createStagnationListener({
     live: () => ({ ...live }),
+    locale: () => options.locale ?? 'zh',
     tracker,
     thresholds,
     confidenceMin: 0.85,
@@ -181,6 +183,18 @@ describe('createStagnationListener.onPostExecute', () => {
     expect(reminder?.source).toMatchObject({ form: 'notice' })
     expect((reminder?.content[0] as { text?: string }).text).toContain('死循环')
     expect(h.entries.at(-1)).toMatchObject({ tag: 'stagnation', action: 'stagnation-alert', tool: 'bash' })
+  })
+
+  it('writes the notice in the selected language', async () => {
+    const h = harness({ locale: 'en' })
+    const exec = fakeExec({ command: 'npm test' })
+    for (let i = 0; i < 3; i++) {
+      await h.listener({ ...exec, arguments: { command: `try ${String(i)}` } }, failure(), nextAccept)
+    }
+    const decision = await h.listener(exec, failure(), nextAccept)
+    const reminder = decision.additionalContexts?.[0]
+    expect((reminder?.content[0] as { text?: string }).text).toContain('parameter-tweaking loop')
+    expect((reminder?.source as unknown as { summary?: string }).summary).toContain('possible stagnation')
   })
 
   it('preserves a downstream block verdict and prepends the reminder', async () => {
@@ -249,6 +263,7 @@ describe('createStagnationListener.onPostExecute', () => {
     const jev = { classify: async () => { throw new Error('must not be called') } } as unknown as JevClient
     const { onPostExecute } = createStagnationListener({
       live: () => ({ enabled: false, mode: 'enforce' }),
+      locale: () => 'zh',
       tracker,
       thresholds,
       confidenceMin: 0.85,
@@ -267,6 +282,7 @@ describe('createStagnationListener.onPostExecute', () => {
     const entries: TelemetryEntry[] = []
     const { onPostExecute } = createStagnationListener({
       live: () => { throw new Error('settings exploded') },
+      locale: () => 'zh',
       tracker,
       thresholds,
       confidenceMin: 0.85,
