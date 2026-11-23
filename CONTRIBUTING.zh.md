@@ -16,7 +16,10 @@ npm ci
 npm run typecheck   # src + 测试，对真实 @deepseek-ai 包类型
 npm test            # vitest，离线，无需 API key
 npm run build       # tsc -> lib/
+npm run preview:ui  # 独立界面预览：http://127.0.0.1:4173
 ```
+
+界面预览只使用演示数据，不连接正在运行的宿主、不读取凭据，也不调用 Provider。顶部工具栏可切换深浅主题、最窄 320px 的面板宽度以及空白和错误状态；预览中的修改只影响内存中的演示数据。`npm run typecheck` 同时检查面板的 React 组件。
 
 可选的真实调用检查（花费几美分，需要 key）：
 

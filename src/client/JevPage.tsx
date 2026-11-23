@@ -12,12 +12,22 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import { PANEL_CSS } from './panel-css.js'
+import { Icon } from './Icons.js'
+import type { IconName } from './Icons.js'
+import { decisionDays, decisionScores, filterDecisions } from './view-model.js'
 
 interface JevStatus {
   enabled: boolean
   mode: 'shadow' | 'enforce'
   provider: string
   model: string
+  activeModel?: string | null
+  endpointOrigin?: string | null
+  connectionError?: string
+  keyReference?: string
+  keyError?: string
   keyConfigured: boolean
   keySource: 'config' | 'credentials' | 'env' | 'none'
   /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
@@ -58,15 +68,29 @@ interface TagSummary {
 /** 校准报告（本地镜像宿主 CalibrationReport，面板不 import 宿主类型）。 */
 interface Calibration {
   windowSize: number
+  scope?: { model: string | null; currentModel: string | null; scanned: number; models: Array<{ model: string; samples: number }> }
   counts: { guard: number; preapprove: number; approvalLoop: number }
   modeSplit: { shadow: number; enforce: number }
-  advice: Array<{ param: string; current: number; suggested: number; basis: string; samples: number; note: string }>
+  advice: Array<{
+    param: string
+    current: number
+    suggested: number
+    basis: string
+    samples: number
+    note: string
+  }>
   insufficient: Array<{ param: string; reason: string }>
   observations: Array<{ param: string; reason: string }>
   /** 与上一份快照的对比摘要（无历史时缺失）。 */
   history?: { previousTs: string; adopted: number; ignored: number; manual?: number }
   /** 预批准候选工具（影子数据推导；一键加入名单）。 */
-  allowlistSuggestions?: Array<{ tool: string; samples: number; avgConfidence: number; avgIrreversibility: number; maxInjection: number }>
+  allowlistSuggestions?: Array<{
+    tool: string
+    samples: number
+    avgConfidence: number
+    avgIrreversibility: number
+    maxInjection: number
+  }>
 }
 
 /** 效果归因（本地镜像宿主 ImpactSummary）。 */
@@ -100,6 +124,7 @@ interface LogEntry {
   callId?: string
   inputTokens?: number
   costUsd?: number
+  scores?: Readonly<Record<string, number>>
 }
 
 type JevPageProps = PropsRuntime<'main'>
@@ -111,13 +136,12 @@ const CSS_TAG_ID = 'dsh-jev-interceptor/panel.css'
 
 /** 主题色调（变量表达式可直接进 color-mix）。 */
 const TONE = {
-  ok: 'var(--dsw-alias-state-success-primary,#16a34a)',
-  warn: 'var(--dsw-alias-state-warn-primary,#d97706)',
-  err: 'var(--dsw-alias-state-error-primary,#dc2626)',
-  brand: 'var(--dsw-alias-brand-primary,#4d76e6)',
-  /** 第四语义色：DeepSeek 品牌色（官方 state-business 变量）。 */
-  business: 'var(--dsw-alias-state-business-primary,#6366f1)',
-  muted: 'var(--dsw-alias-label-secondary,#8a8a8a)',
+  ok: 'var(--j-ok)',
+  warn: 'var(--j-warn)',
+  err: 'var(--j-err)',
+  brand: 'var(--j-brand)',
+  business: 'var(--j-business)',
+  muted: 'var(--j-muted)',
 } as const
 
 type Tone = keyof typeof TONE
@@ -126,13 +150,13 @@ const MODE_LABEL: Record<string, string> = { shadow: '观察', enforce: '执行'
 
 const MODE_HINT: Record<string, string> = {
   shadow: '只记录决策，不拦截也不放行',
-  enforce: '按决策放行或转人工',
+  enforce: '执行风险拦截与审批，其他调用交回原生流程',
 }
 
 /** 决策环节（tag）的中文名、一句话说明与专属色调（每个环节一种颜色）。 */
 const TAG_META: Record<string, { label: string; hint: string; tone: Tone }> = {
   guard: { label: '守门人', hint: '工具调用的风险 / 不可逆 / 注入判断', tone: 'brand' },
-  preapprove: { label: '预批准', hint: '明确已授权就免点击', tone: 'ok' },
+  preapprove: { label: '预批准', hint: '核对授权范围与可逆性', tone: 'ok' },
   'session-reference': { label: '会话保留', hint: '@ 引用快照的价值打分', tone: 'business' },
   'approval-loop': { label: '审批一致率', hint: '影子决策与人工决定的对照', tone: 'muted' },
   stagnation: { label: '停滞检测', hint: '重复失败时提醒换路', tone: 'warn' },
@@ -141,17 +165,17 @@ const TAG_META: Record<string, { label: string; hint: string; tone: Tone }> = {
 
 /**
  * 决策动作的中文名与色调。视觉编码约定：
- * - 实色 = Jev 生效的决策（放行紫 / 转人工橙 / 拒绝红 / 自动批绿 / 人工蓝 / 打分绿）；
- * - 斜纹半透明（isFallback）= 降级回退（决策系统没工作，走默认）；
+ * - 实色区分动作类型；是否实际执行由模式字段决定；
+ * - 斜纹 = 降级回退，继续原生流程；
  * - 实灰 = 默认/跳过类。同一张卡内共现的动作颜色互异。
  */
 const ACTION_META: Record<string, { label: string; tone: Tone; fallback?: boolean }> = {
-  delegate: { label: '放行', tone: 'business' },
+  delegate: { label: '交回原生', tone: 'business' },
   ask: { label: '转人工', tone: 'warn' },
   deny: { label: '拒绝', tone: 'err' },
   'auto-approve': { label: '自动批准', tone: 'ok' },
   human: { label: '人工决定', tone: 'brand' },
-  degraded: { label: '降级放行', tone: 'muted', fallback: true },
+  degraded: { label: '降级回退', tone: 'muted', fallback: true },
   skipped: { label: '跳过', tone: 'muted' },
   'retention-scored': { label: '打分保留', tone: 'ok' },
   'retention-fifo': { label: 'FIFO 淘汰', tone: 'muted' },
@@ -161,7 +185,7 @@ const ACTION_META: Record<string, { label: string; tone: Tone; fallback?: boolea
 }
 
 /** 降级回退的斜纹底（与实色决策形成"生效/未生效"的视觉区分）。 */
-const FADED_FILL = 'repeating-linear-gradient(45deg, var(--dsw-alias-label-secondary,#8a8a8a) 0 3px, transparent 3px 7px)'
+const FADED_FILL = 'repeating-linear-gradient(45deg, var(--j-muted) 0 3px, transparent 3px 7px)'
 
 function actionMeta(action: string): { label: string; tone: Tone; fallback?: boolean } {
   return ACTION_META[action] ?? { label: action, tone: 'brand' }
@@ -182,10 +206,12 @@ const BUCKET_LABEL: Record<string, { label: string; tone: Tone }> = {
 }
 
 const PROVIDERS = [
-  { id: 'typesafe', label: 'TypeSafe', hint: '官方 Jev 端点，延迟最低' },
-  { id: 'openrouter', label: 'OpenRouter', hint: '经 OpenRouter 代理，无需等待名单' },
+  { id: 'typesafe', label: 'TypeSafe', hint: 'TypeSafe 直连' },
+  { id: 'openrouter', label: 'OpenRouter', hint: '通过 System One 接口调用' },
   { id: 'custom', label: '自定义', hint: '兼容 Jev 协议的代理或自建端点' },
-]
+] as const
+
+type ProviderChoice = (typeof PROVIDERS)[number]['id']
 
 const KEY_SOURCE: Record<string, string> = {
   config: '面板或配置文件',
@@ -202,15 +228,19 @@ interface PingResult {
   error?: string
 }
 
-/** 连接测试错误码 → 中文（rate-limited 视为成功，key 已通过认证）。 */
+/** Connection feedback distinguishes a verified answer from a throttled request. */
 const PING_ERROR: Record<string, string> = {
   'no-key': '未配置 API Key',
-  'network': '网络错误：无法连接端点',
-  'timeout': '超时：检查网络/代理，或端点响应过慢',
-  'auth': '认证失败：Key 无效或已过期',
+  'invalid-connection': '请先保存有效的连接配置。',
+  'connection-changed': '连接已变更，请重新测试。',
+  'credential-unavailable': '凭据服务暂不可用。',
+  aborted: '连接测试已取消。',
+  network: '网络错误：无法连接端点',
+  timeout: '超时：检查网络/代理，或端点响应过慢',
+  auth: '认证失败：Key 无效或已过期',
   'not-found': '端点不存在：检查 Provider 或 Base URL',
-  'rate-limited': 'Key 有效（当前限流中，稍后即可正常使用）',
-  'server': '服务端错误：Provider 侧问题',
+  'rate-limited': '服务返回限流，请稍后复测',
+  server: '服务端错误：Provider 侧问题',
   'invalid-response': '响应格式异常：端点可能不是 Jev decisions API',
 }
 
@@ -226,130 +256,17 @@ function pingText(result: PingResult): string {
   if (result.ok && result.error === undefined) {
     return `连接正常${result.model !== undefined ? ` · ${result.model}` : ''} · ${String(result.latencyMs)}ms`
   }
-  if (result.error === 'rate-limited') return `Key 有效（当前限流中）· ${String(result.latencyMs)}ms`
   return `${PING_ERROR[result.error ?? ''] ?? `失败（${result.error ?? '未知错误'}）`} · ${String(result.latencyMs)}ms`
 }
 
 const TABS = [
-  { id: 'overview', label: '概览' },
-  { id: 'log', label: '决策记录' },
-  { id: 'calibration', label: '阈值校准' },
-  { id: 'settings', label: '设置' },
+  { id: 'overview', label: '概览', icon: 'overview' },
+  { id: 'log', label: '决策记录', icon: 'log' },
+  { id: 'calibration', label: '阈值校准', icon: 'sliders' },
+  { id: 'settings', label: '设置', icon: 'settings' },
 ] as const
 
-/** 面板样式表（官方主题 token 驱动；深浅主题与第三方主题自动跟随）。 */
-export const PANEL_CSS = `
-.jev-root{height:100%;min-height:0;max-height:100vh;box-sizing:border-box;padding:20px 24px 24px;display:flex;flex-direction:column;gap:14px;max-width:1120px;font-size:13px;line-height:1.55;color:var(--dsw-alias-label-primary);}
-.jev-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;}
-.jev-logo{flex:none;width:34px;height:34px;border-radius:11px;display:grid;place-items:center;font-size:16px;line-height:1;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d76e6) 13%,transparent);}
-.jev-headtext{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
-.jev-title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
-.jev-title{margin:0;font-size:16px;font-weight:600;line-height:22px;}
-.jev-sub{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.jev-status{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;line-height:18px;padding:1px 9px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2);white-space:nowrap;}
-.jev-status[data-on="1"]{color:var(--dsw-alias-state-success-primary,#16a34a);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 42%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 10%,transparent);}
-.jev-dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none;}
-.jev-status[data-on="1"] .jev-dot{box-shadow:0 0 0 3px color-mix(in srgb,currentColor 20%,transparent);}
-.jev-btn{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 12px;font-size:12px;font-family:inherit;cursor:pointer;white-space:nowrap;transition:background .12s ease,border-color .12s ease,color .12s ease;}
-.jev-btn:hover:not(:disabled){border-color:var(--dsw-alias-brand-primary,#4d76e6);color:var(--dsw-alias-brand-primary,#4d76e6);}
-.jev-btn:disabled{opacity:.45;cursor:default;}
-.jev-btn--primary{background:var(--dsw-alias-brand-primary,#4d76e6);border-color:var(--dsw-alias-brand-primary,#4d76e6);color:var(--dsw-alias-bg-base,#fff);}
-.jev-btn--primary:hover:not(:disabled){color:var(--dsw-alias-bg-base,#fff);opacity:.88;}
-.jev-seg{display:inline-flex;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;overflow:hidden;}
-.jev-seg>button{border:0;background:transparent;color:var(--dsw-alias-label-secondary);padding:4px 10px;font-size:11.5px;font-family:inherit;cursor:pointer;}
-.jev-seg>button+button{border-left:1px solid var(--dsw-alias-border-l1);}
-.jev-seg>button:hover:not(:disabled){color:var(--dsw-alias-label-primary);}
-.jev-seg>button[data-on="1"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d76e6) 14%,transparent);color:var(--dsw-alias-brand-primary,#4d76e6);font-weight:500;}
-.jev-seg>button:disabled{opacity:.5;cursor:default;}
-.jev-toast{display:flex;align-items:center;gap:8px;border-radius:8px;padding:6px 11px;font-size:12px;border:1px solid transparent;}
-.jev-toast[data-tone="ok"]{color:var(--dsw-alias-state-success-primary,#16a34a);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 28%,transparent);}
-.jev-toast[data-tone="err"]{color:var(--dsw-alias-state-error-primary,#dc2626);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#dc2626) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#dc2626) 28%,transparent);}
-.jev-toast[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary,#d97706);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 28%,transparent);}
-.jev-banner{border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 32%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d97706) 8%,transparent);color:var(--dsw-alias-state-warn-primary,#d97706);border-radius:10px;padding:7px 11px;font-size:11.5px;line-height:17px;}
-.jev-hero{border:1px solid var(--dsw-alias-border-l1);border-radius:14px;background:var(--dsw-alias-bg-layer-1);padding:13px 15px;display:flex;gap:18px;flex-wrap:wrap;align-items:center;}
-.jev-kpis{flex:1 1 460px;min-width:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:9px;}
-.jev-kpi{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-2);padding:8px 11px;min-width:0;}
-.jev-kpi b{display:block;font-size:18px;line-height:23px;font-weight:600;font-variant-numeric:tabular-nums;}
-.jev-kpi span{display:block;font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.jev-kpi[data-tone="ok"] b{color:var(--dsw-alias-state-success-primary,#16a34a);}
-.jev-kpi[data-tone="warn"] b{color:var(--dsw-alias-state-warn-primary,#d97706);}
-.jev-kpi[data-tone="err"] b{color:var(--dsw-alias-state-error-primary,#dc2626);}
-.jev-hero-side{flex:0 1 250px;min-width:210px;display:flex;flex-direction:column;gap:6px;font-size:11.5px;}
-.jev-fact{display:flex;align-items:center;gap:8px;justify-content:space-between;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-fact>b{font-weight:500;font-size:12px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:62%;}
-.jev-tabs{display:flex;gap:2px;border-bottom:1px solid var(--dsw-alias-border-l1);margin-top:2px;}
-.jev-tab{position:relative;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:12.5px;padding:7px 11px;cursor:pointer;border-radius:8px 8px 0 0;}
-.jev-tab:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 5%,transparent));}
-.jev-tab[data-on="1"]{color:var(--dsw-alias-label-primary);font-weight:600;}
-.jev-tab[data-on="1"]::after{content:"";position:absolute;left:9px;right:9px;bottom:-1px;height:2px;border-radius:2px;background:var(--dsw-alias-brand-primary,#4d76e6);}
-.jev-tab-count{margin-left:6px;font-size:10.5px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-variant-numeric:tabular-nums;}
-.jev-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;}
-.jev-card{border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:12px 14px;display:flex;flex-direction:column;gap:9px;min-width:0;}
-.jev-card-head{display:flex;align-items:flex-start;gap:10px;}
-.jev-card-title{font-size:13px;font-weight:600;line-height:18px;}
-.jev-card-sub{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-card-metrics{margin-left:auto;text-align:right;font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-variant-numeric:tabular-nums;white-space:nowrap;}
-.jev-stack{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--dsw-alias-border-l1);}
-.jev-stack>i{display:block;height:100%;}
-.jev-legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;}
-.jev-legend>li{display:flex;align-items:center;gap:7px;font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-secondary);min-width:0;}
-.jev-swatch{width:8px;height:8px;border-radius:2px;flex:none;}
-.jev-legend-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.jev-legend>li>b{font-weight:500;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;}
-.jev-legend-pct{width:40px;text-align:right;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));font-variant-numeric:tabular-nums;}
-.jev-badge{display:inline-flex;align-items:center;font-size:10.5px;line-height:16px;padding:0 7px;border-radius:999px;white-space:nowrap;border:1px solid transparent;font-variant-numeric:tabular-nums;}
-.jev-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.jev-chips{display:flex;gap:6px;flex-wrap:wrap;}
-.jev-chip{border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-secondary);border-radius:999px;padding:3px 11px;font-size:11.5px;font-family:inherit;cursor:pointer;}
-.jev-chip:hover{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2);}
-.jev-chip[data-on="1"]{border-color:var(--dsw-alias-brand-primary,#4d76e6);color:var(--dsw-alias-brand-primary,#4d76e6);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d76e6) 10%,transparent);}
-.jev-chip>b{margin-left:5px;font-weight:500;font-variant-numeric:tabular-nums;opacity:.75;}
-.jev-search{flex:1;min-width:150px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:inherit;padding:5px 10px;font-size:12px;outline:none;font-family:inherit;}
-.jev-search:focus{border-color:var(--dsw-alias-brand-primary,#4d76e6);}
-.jev-table{border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);overflow:hidden;}
-.jev-thead,.jev-row{display:grid;grid-template-columns:92px 84px minmax(90px,1fr) 96px 68px 52px minmax(130px,2fr);gap:8px;align-items:center;padding:5px 12px;}
-.jev-thead{font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));background:var(--dsw-alias-bg-layer-2);border-bottom:1px solid var(--dsw-alias-border-l1);font-weight:500;}
-.jev-row{border-top:1px solid var(--dsw-alias-border-l1);font-size:11.5px;line-height:17px;cursor:pointer;transition:background .1s ease;}
-.jev-thead+.jev-row{border-top:0;}
-.jev-row:hover{background:var(--dsw-alias-interactive-bg-hover,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 5%,transparent));}
-.jev-row[data-open="1"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d76e6) 6%,transparent);}
-.jev-cell{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.jev-time{font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary);}
-.jev-time>i{font-style:normal;margin-left:6px;font-size:10px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-mono{font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);}
-.jev-num{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary);}
-.jev-strong{color:var(--dsw-alias-label-primary);}
-.jev-detail{font-size:10.5px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-detail-full{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:4px 16px;padding:7px 0 3px;margin-top:5px;border-top:1px dashed var(--dsw-alias-border-l1);font-size:11px;line-height:16px;}
-.jev-kv{display:flex;gap:6px;min-width:0;}
-.jev-kv>span{flex:none;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-kv>b{font-weight:500;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.jev-note{font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));margin:0;}
-.jev-advice{border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-base);padding:9px 11px;display:flex;flex-direction:column;gap:3px;}
-.jev-advice-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;line-height:18px;}
-.jev-param{font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11.5px;font-weight:600;}
-.jev-delta{font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--dsw-alias-brand-primary,#4d76e6);}
-.jev-delta>i{font-style:normal;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-field{display:flex;flex-direction:column;gap:5px;}
-.jev-field-label{font-size:11.5px;color:var(--dsw-alias-label-secondary);}
-.jev-input{width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-base);color:inherit;padding:6px 10px;font-size:12.5px;outline:none;font-family:inherit;}
-.jev-input:focus{border-color:var(--dsw-alias-brand-primary,#4d76e6);}
-.jev-provider{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;}
-.jev-provider>button{text-align:left;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);border-radius:10px;padding:8px 11px;font-family:inherit;cursor:pointer;color:inherit;}
-.jev-provider>button:hover{border-color:var(--dsw-alias-border-l2);}
-.jev-provider>button[data-on="1"]{border-color:var(--dsw-alias-brand-primary,#4d76e6);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d76e6) 8%,transparent);}
-.jev-provider b{display:block;font-size:12.5px;line-height:18px;font-weight:600;}
-.jev-provider span{display:block;font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));}
-.jev-empty{border:1px dashed var(--dsw-alias-border-l2);border-radius:12px;padding:26px 16px;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;color:var(--dsw-alias-label-secondary);font-size:12.5px;}
-.jev-empty b{font-size:13px;color:var(--dsw-alias-label-primary);font-weight:600;}
-.jev-row-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;}
-.jev-mini{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;}
-.jev-mini>li{display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid var(--dsw-alias-border-l1);font-size:11.5px;line-height:17px;min-width:0;}
-.jev-mini>li:first-child{border-top:0;}
-@media (max-width:820px){.jev-col-mode{display:none;}.jev-thead,.jev-row{grid-template-columns:84px 78px minmax(80px,1fr) 90px 62px minmax(110px,1.6fr);}}
-@media (max-width:620px){.jev-root{padding:14px;}.jev-thead{display:none;}.jev-row{grid-template-columns:78px minmax(0,1fr) auto;row-gap:2px;}.jev-col-tag,.jev-col-lat,.jev-col-mode,.jev-col-detail{display:none;}}
-`
+export { PANEL_CSS } from './panel-css.js'
 
 /** 幂等注入面板样式（官方 data-plugin-css 约定）。 */
 export function injectPanelCss(): void {
@@ -396,12 +313,6 @@ function fmtNum(value: number | undefined): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('zh-CN') : '0'
 }
 
-function shortId(value: string | undefined): string {
-  if (typeof value !== 'string' || value.length === 0) return '—'
-  return value.length > 14 ? `${value.slice(0, 10)}…` : value
-}
-
-
 /** 美元格式化（与宿主 renderImpact 的 usd() 同口径：<$0.01 用 6 位小数）。 */
 function fmtUsd(value: number): string {
   return `$${value < 0.01 ? value.toFixed(6) : value.toFixed(4)}`
@@ -417,29 +328,36 @@ function fmtUsdCard(cost: Impact['cost']): string {
 /** 误批徽章：零分母（预批未触发）如实标"无样本"，不把 0/0 包装成 0。 */
 function misApprovalBadge(impact: Impact): React.JSX.Element {
   const enforceWoap = impact.agreement.enforce['would-over-approve'] ?? 0
-  const hasSamples = enforceWoap > 0 || impact.enforce.autoApproved > 0
-    || Object.values(impact.agreement.enforce).some(n => n > 0)
+  const hasSamples =
+    enforceWoap > 0 ||
+    impact.enforce.autoApproved > 0 ||
+    Object.values(impact.agreement.enforce).some((n) => n > 0)
   if (!hasSamples) return <Badge tone="muted">误批 — 无样本</Badge>
-  return enforceWoap === 0
-    ? <Badge tone="ok">误批 0</Badge>
-    : <Badge tone="err">{`误批 ${fmtNum(enforceWoap)} ⚠️`}</Badge>
+  return enforceWoap === 0 ? (
+    <Badge tone="ok">误批 0</Badge>
+  ) : (
+    <Badge tone="err">{`误批 ${fmtNum(enforceWoap)}`}</Badge>
+  )
 }
 
 /** 净收益卡的一句话（与宿主 renderImpact 的分支同构）。 */
 function oneLineSummary(impact: Impact): string {
   const costText = fmtUsdCard(impact.cost)
-  const suffix = impact.cost.cachedDecisions > 0 ? `（${fmtNum(impact.cost.cachedDecisions)} 次缓存命中免费）` : ''
+  const suffix =
+    impact.cost.cachedDecisions > 0 ? `（${fmtNum(impact.cost.cachedDecisions)} 次缓存命中免费）` : ''
   if (impact.enforce.autoApproved > 0 || impact.enforce.denied > 0) {
-    return `${fmtNum(impact.enforce.autoApproved + impact.enforce.denied)} 次该人工把关的判断被自动完成，`
-      + `误批 ${fmtNum(impact.agreement.enforce['would-over-approve'] ?? 0)} 次`
-      + (costText.length > 0 ? `，成本 ${costText}` : '')
-      + suffix
+    return (
+      `${fmtNum(impact.enforce.autoApproved + impact.enforce.denied)} 次审批或拦截由 Jev 完成，` +
+      `误批 ${fmtNum(impact.agreement.enforce['would-over-approve'] ?? 0)} 次` +
+      (costText.length > 0 ? `，成本 ${costText}` : '') +
+      suffix
+    )
   }
   if (impact.enforce.asked + impact.enforce.stagnationAlerts > 0) {
-    return `enforce 期已转人工 ${fmtNum(impact.enforce.asked)} 次、停滞提醒 ${fmtNum(impact.enforce.stagnationAlerts)} 次，还没有自动批准或拦截${suffix}`
+    return `执行期已转交人工 ${fmtNum(impact.enforce.asked)} 次、停滞提醒 ${fmtNum(impact.enforce.stagnationAlerts)} 次，还没有自动批准或拦截${suffix}`
   }
-  if (impact.modeSplit.shadow > 0) return `enforce 期还没有生效动作；shadow 期数据在积累校准依据${suffix}`
-  return `enforce 期还没有生效动作${suffix}`
+  if (impact.modeSplit.shadow > 0) return `尚无执行期生效动作，观察记录正在积累校准依据${suffix}`
+  return `执行期尚无生效动作${suffix}`
 }
 
 function tagMeta(tag: string): { label: string; hint: string; tone: Tone } {
@@ -466,26 +384,29 @@ async function getJson(path: string): Promise<unknown> {
     error.status = response.status
     throw error
   }
-  return await response.json() as unknown
+  return (await response.json()) as unknown
 }
 
 /** 写配置；失败时把服务端 error 文案抛出来。 */
-async function putConfig(patch: Record<string, unknown>): Promise<void> {
+async function putConfig(patch: Record<string, unknown>): Promise<boolean | undefined> {
   const response = await fetch(`${API}/config`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(patch),
   })
-  if (response.ok) return
   let detail = `HTTP ${String(response.status)}`
   try {
-    const body = await response.json() as { error?: unknown }
+    const body = (await response.json()) as { error?: unknown; persisted?: boolean }
+    if (response.ok) return body.persisted
     if (typeof body.error === 'string') detail = body.error
   } catch {
     // 响应不是 JSON：保留状态码文案。
   }
+  if (response.ok) return undefined
   throw new Error(detail)
 }
+
+const MEMORY_ONLY = '仅本次运行生效。可在 profile 配置中保存。'
 
 function Badge({ tone, children }: { tone: Tone; children: React.ReactNode }): React.JSX.Element {
   const color = TONE[tone]
@@ -496,18 +417,44 @@ function Badge({ tone, children }: { tone: Tone; children: React.ReactNode }): R
   )
 }
 
-function Kpi({ label, value, tone, hint }: { label: string; value: number; tone?: Tone; hint: string }): React.JSX.Element {
+function Kpi({
+  label,
+  value,
+  tone,
+  hint,
+  icon,
+}: {
+  label: string
+  value: number
+  tone?: Tone
+  hint: string
+  icon: IconName
+}): React.JSX.Element {
   return (
-    <div className="jev-kpi" data-tone={tone} title={hint}>
+    <div className="jev-kpi" data-tone={tone}>
+      <span className="jev-kpi-label">
+        <Icon name={icon} size={14} />
+        {label}
+      </span>
       <b>{fmtNum(value)}</b>
-      <span>{label}</span>
+      <small>{hint}</small>
     </div>
   )
 }
 
-interface SegmentOption { value: string; label: string; title?: string }
+interface SegmentOption {
+  value: string
+  label: string
+  title?: string
+}
 
-function Segmented({ value, options, onChange, disabled, label }: {
+function Segmented({
+  value,
+  options,
+  onChange,
+  disabled,
+  label,
+}: {
   value: string
   options: readonly SegmentOption[]
   onChange: (next: string) => void
@@ -516,140 +463,162 @@ function Segmented({ value, options, onChange, disabled, label }: {
 }): React.JSX.Element {
   return (
     <div className="jev-seg" role="group" aria-label={label}>
-      {options.map(option => (
+      {options.map((option) => (
         <button
           key={option.value}
           type="button"
           data-on={option.value === value ? '1' : '0'}
           title={option.title}
+          aria-pressed={option.value === value}
           disabled={disabled}
-          onClick={() => { if (option.value !== value) onChange(option.value) }}
-        >{option.label}</button>
+          onClick={() => {
+            if (option.value !== value) onChange(option.value)
+          }}
+        >
+          {option.label}
+        </button>
       ))}
     </div>
   )
 }
 
 function Fact({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
-  return <div className="jev-fact"><span>{label}</span><b>{children}</b></div>
+  return (
+    <div className="jev-fact">
+      <span>{label}</span>
+      <b>{children}</b>
+    </div>
+  )
 }
 
-/** 单个决策环节的分布卡：环节专属色条 + 堆叠条 + 图例。 */
-/** 每日决策量柱状图（近 14 个活跃日；主体=常规决策，顶段=拦截/转人工）。
- * 按可视化规范：堆叠段间 2px 表面间隙、柱顶 4px 圆角、基线、色点图例。 */
+/** Calendar days are continuous, with the same UTC boundary as the host summary. */
 function DailyTrend({ log }: { log: LogEntry[] }): React.JSX.Element | null {
-  const days = useMemo(() => {
-    const byDay = new Map<string, { total: number; flagged: number }>()
-    for (const entry of log) {
-      const day = entry.ts.slice(0, 10)
-      const bucket = byDay.get(day) ?? { total: 0, flagged: 0 }
-      bucket.total += 1
-      if (entry.action === 'deny' || entry.action === 'ask') bucket.flagged += 1
-      byDay.set(day, bucket)
-    }
-    return [...byDay.entries()].sort((left, right) => (left[0] < right[0] ? -1 : 1)).slice(-14)
-  }, [log])
+  const days = useMemo(() => decisionDays(log), [log])
   if (days.length === 0) return null
-  const max = Math.max(...days.map(d => d[1].total), 1)
-  // 日期轴：首/中/尾三个锚点（14 根柱全标会碰撞）。
-  const tickAt = (index: number): boolean => index === 0 || index === Math.floor((days.length - 1) / 2) || index === days.length - 1
+  const max = Math.max(...days.map((day) => day.total), 1)
   return (
     <section className="jev-card">
       <header className="jev-card-head">
         <div>
-          <div className="jev-card-title">每日决策量</div>
-          <div className="jev-card-sub">近 {String(days.length)} 个活跃日</div>
+          <div className="jev-card-title">决策活动</div>
+          <div className="jev-card-sub">最近记录所在的 14 天，按 UTC 日期</div>
         </div>
-        {/* 标准色点图例：两段成分，不用文字解释图本身 */}
-        <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
-            <i style={{ width: 9, height: 9, borderRadius: 2, background: TONE.brand, display: 'inline-block' }} />常规决策
-          </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--dsw-alias-label-secondary)' }}>
-            <i style={{ width: 9, height: 9, borderRadius: 2, background: TONE.warn, display: 'inline-block' }} />拦截 / 转人工
-          </span>
-          <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))' }}>{`峰值 ${String(max)}/天`}</span>
-        </div>
+        <span className="jev-card-metrics">峰值 {fmtNum(max)} 次 / 天</span>
       </header>
-      {/* 图表区封顶：柱宽 ≤28px（14 根 × (28+6) - 6 ≈ 446px），不随卡片宽度无限变粗 */}
-      <div style={{ maxWidth: 446, marginRight: 'auto' }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'flex-end',
-          gap: 6,
-          height: 96,
-          paddingBottom: 4,
-          borderBottom: '1px solid var(--dsw-alias-border-l1)',
-        }}>
-          {days.map(([day, { total, flagged }]) => (
-            <div
-              key={day}
-              title={`${day.slice(5)} · 共 ${String(total)} 次${flagged > 0 ? `（拦截/转人工 ${String(flagged)}）` : ''}`}
-              style={{ flex: '1 1 0', maxWidth: 28, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}
-            >
-              {flagged > 0 && (
-                <div style={{
-                  height: `${String(flagged / max * 100)}%`,
-                  background: TONE.warn,
-                  borderRadius: '4px 4px 0 0',
-                  marginBottom: 2, // 堆叠段之间的表面间隙
-                }} />
-              )}
-              <div style={{
-                height: `${String((total - flagged) / max * 100)}%`,
-                background: TONE.brand,
-                borderRadius: flagged > 0 ? '0' : '4px 4px 0 0', // 顶段存在时主体不封顶
-                minHeight: 2,
-              }} />
-            </div>
-          ))}
+      <div className="jev-chart">
+        <div className="jev-chart-axis" aria-hidden="true">
+          <span>{fmtNum(max)}</span>
+          <span>{fmtNum(Math.round(max / 2))}</span>
+          <span>0</span>
         </div>
-        {/* 日期轴锚点（与柱同宽结构，保持对齐） */}
-        <div style={{ display: 'flex', gap: 6, marginTop: 3 }}>
-          {days.map(([day], index) => (
-            <span key={day} style={{ flex: '1 1 0', maxWidth: 28, fontSize: 10, color: 'var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))', textAlign: index === 0 ? 'left' : index === days.length - 1 ? 'right' : 'center', fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)' }}>
-              {tickAt(index) ? day.slice(5).replace('-', '/') : ''}
-            </span>
-          ))}
+        <div className="jev-chart-body">
+          <div className="jev-chart-bars" role="group" aria-label="每日决策量，含观察模式">
+            {days.map((day) => (
+              <div
+                key={day.day}
+                className="jev-chart-bar"
+                tabIndex={0}
+                aria-label={`${day.day}，${day.total} 次决策，${day.flagged} 次需关注，${day.degraded} 次降级`}
+              >
+                <span className="jev-chart-tooltip" aria-hidden="true">
+                  {day.day.slice(5)}：{day.total} 次，关注 {day.flagged}，降级 {day.degraded}
+                </span>
+                {day.flagged > 0 && (
+                  <i style={{ height: `${(day.flagged / max) * 100}%`, background: TONE.warn }} />
+                )}
+                {day.degraded > 0 && (
+                  <i style={{ height: `${(day.degraded / max) * 100}%`, background: FADED_FILL }} />
+                )}
+                {day.total - day.flagged - day.degraded > 0 && (
+                  <i
+                    style={{
+                      height: `${((day.total - day.flagged - day.degraded) / max) * 100}%`,
+                      background: TONE.brand,
+                    }}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="jev-chart-ticks" aria-hidden="true">
+            {days.map((day, index) => (
+              <span key={day.day}>
+                {[0, 4, 9, 13].includes(index) ? day.day.slice(5).replace('-', '/') : ''}
+              </span>
+            ))}
+          </div>
         </div>
+      </div>
+      <div className="jev-chart-legend">
+        <span>
+          <i className="jev-swatch" style={{ background: TONE.brand }} />
+          其他决策
+        </span>
+        <span>
+          <i className="jev-swatch" style={{ background: TONE.warn }} />
+          需关注
+        </span>
+        <span>
+          <i className="jev-swatch" style={{ background: FADED_FILL }} />
+          降级回退
+        </span>
+        <span style={{ marginLeft: 'auto' }}>含观察模式记录</span>
       </div>
     </section>
   )
 }
 
-/** 工具维度 Top 榜：哪个工具被判断最多、被拦最多（log 窗口内）。 */
-function ToolTopCard({ log }: { log: LogEntry[] }): React.JSX.Element | null {
+function ToolTopCard({
+  log,
+  onSelect,
+}: {
+  log: LogEntry[]
+  onSelect: (tool: string) => void
+}): React.JSX.Element | null {
   const tools = useMemo(() => {
     const byTool = new Map<string, { total: number; byAction: Record<string, number> }>()
     for (const entry of log) {
-      const tool = entry.tool ?? '—'
-      const bucket = byTool.get(tool) ?? { total: 0, byAction: {} }
+      if (entry.tool === undefined) continue
+      const bucket = byTool.get(entry.tool) ?? { total: 0, byAction: {} }
       bucket.total += 1
       bucket.byAction[entry.action] = (bucket.byAction[entry.action] ?? 0) + 1
-      byTool.set(tool, bucket)
+      byTool.set(entry.tool, bucket)
     }
-    return [...byTool.entries()].sort((left, right) => right[1].total - left[1].total).slice(0, 8)
+    return [...byTool.entries()].sort((left, right) => right[1].total - left[1].total).slice(0, 5)
   }, [log])
   if (tools.length === 0) return null
-  const max = tools[0][1].total
+  const max = tools[0]![1].total
   return (
     <section className="jev-card">
       <header className="jev-card-head">
         <div>
-          <div className="jev-card-title">工具 Top 8</div>
-          <div className="jev-card-sub">决策量与动作构成（统计窗口内）</div>
+          <div className="jev-card-title">工具分布</div>
+          <div className="jev-card-sub">最近 {fmtNum(log.length)} 条中的前 5 个工具，点击查看记录</div>
         </div>
       </header>
       {tools.map(([tool, { total, byAction }]) => (
-        <div key={tool} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }}>
-          <span className="jev-mono" style={{ flex: '0 0 128px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={tool}>{tool}</span>
-          <div style={{ flex: 1, display: 'flex', height: 10, overflow: 'hidden', borderRadius: 5 }}>
-            {Object.entries(byAction).sort((l, r) => r[1] - l[1]).map(([action, n]) => (
-              <i key={action} title={`${actionMeta(action).label} ${String(n)}`} style={{ width: `${String(n / max * 100)}%`, background: actionFill(actionMeta(action)), borderRight: '2px solid var(--dsw-alias-bg-base,#fff)' }} />
-            ))}
-          </div>
-          <b style={{ flex: '0 0 40px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{String(total)}</b>
-        </div>
+        <button
+          key={tool}
+          className="jev-tool-row"
+          onClick={() => {
+            onSelect(tool)
+          }}
+          title={`查看 ${tool} 的决策记录`}
+        >
+          <span className="jev-cell jev-mono">{tool}</span>
+          <span className="jev-tool-bar">
+            {Object.entries(byAction)
+              .sort((l, r) => r[1] - l[1])
+              .map(([action, n]) => (
+                <i
+                  key={action}
+                  title={`${actionMeta(action).label} ${n}`}
+                  style={{ width: `${(n / max) * 100}%`, background: actionFill(actionMeta(action)) }}
+                />
+              ))}
+          </span>
+          <b>{fmtNum(total)}</b>
+        </button>
       ))}
     </section>
   )
@@ -659,62 +628,76 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
   const meta = tagMeta(summary.tag)
   const toneColor = TONE[meta.tone]
   const actions = summary.actions ?? {}
-  const entries = Object.entries(actions).filter(entry => entry[1] > 0).sort((left, right) => right[1] - left[1])
+  const entries = Object.entries(actions)
+    .filter((entry) => entry[1] > 0)
+    .sort((left, right) => right[1] - left[1])
   const total = summary.calls > 0 ? summary.calls : entries.reduce((sum, entry) => sum + entry[1], 0)
-  const buckets = summary.agreementBuckets === undefined
-    ? []
-    : Object.entries(summary.agreementBuckets).filter(entry => entry[1] > 0)
+  const buckets =
+    summary.agreementBuckets === undefined
+      ? []
+      : Object.entries(summary.agreementBuckets).filter((entry) => entry[1] > 0)
   return (
-    <article className="jev-card" style={{ borderLeft: `3px solid ${toneColor}` }}>
+    <article className="jev-card">
       <header className="jev-card-head">
         <div style={{ minWidth: 0 }}>
           <div className="jev-card-title" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span className="jev-swatch" style={{ background: toneColor, width: 9, height: 9, flex: 'none' }} />
+            <span
+              className="jev-swatch"
+              style={{ background: toneColor, width: 9, height: 9, flex: 'none' }}
+            />
             {meta.label}
           </div>
           <div className="jev-card-sub">{meta.hint}</div>
         </div>
         <div className="jev-card-metrics">
           <div>{fmtNum(total)} 次</div>
-          {summary.latencyP50 !== undefined ? <div>{`p50 ${String(summary.latencyP50)} / p95 ${String(summary.latencyP95 ?? summary.latencyP50)}ms`}</div> : null}
+          {summary.latencyP50 !== undefined ? (
+            <div>{`p50 ${String(summary.latencyP50)} / p95 ${String(summary.latencyP95 ?? summary.latencyP50)}ms`}</div>
+          ) : null}
           {summary.costUsd !== undefined && summary.costUsd > 0 ? <div>{fmtUsd(summary.costUsd)}</div> : null}
-          {summary.cached > 0 ? <div style={{ color: TONE.business }}>{`⚡缓存 ${String(summary.cached)}`}</div> : null}
-          {summary.degraded > 0 ? <div style={{ color: TONE.warn }}>{`降级 ${String(summary.degraded)}`}</div> : null}
+          {summary.cached > 0 ? (
+            <div style={{ color: TONE.business }}>{`缓存 ${String(summary.cached)}`}</div>
+          ) : null}
+          {summary.degraded > 0 ? (
+            <div style={{ color: TONE.warn }}>{`降级 ${String(summary.degraded)}`}</div>
+          ) : null}
         </div>
       </header>
       <div className="jev-stack">
-        {entries.length === 0
-          ? <i title="窗口内没有决策" style={{ width: '100%', background: TONE.muted, opacity: .22 }} />
-          : entries.map(entry => (
+        {entries.length === 0 ? (
+          <i title="窗口内没有决策" style={{ width: '100%', background: TONE.muted, opacity: 0.22 }} />
+        ) : (
+          entries.map((entry) => (
             <i
               key={entry[0]}
               title={`${actionMeta(entry[0]).label} ${String(entry[1])}`}
               style={{
-                width: `${String(total > 0 ? entry[1] / total * 100 : 0)}%`,
+                width: `${String(total > 0 ? (entry[1] / total) * 100 : 0)}%`,
                 background: actionFill(actionMeta(entry[0])),
                 // 堆叠段之间的表面间隙（可视化规范）；末段不加避免贴边空隙。
-                borderRight: entry === entries.at(-1) ? undefined : '2px solid var(--dsw-alias-bg-base,#fff)',
+                borderRight: entry === entries.at(-1) ? undefined : '2px solid var(--j-surface)',
               }}
             />
-          ))}
-      </div>
-      {entries.length === 0
-        ? <p className="jev-note">窗口内还没有记录。</p>
-        : (
-          <ul className="jev-legend">
-            {entries.map(entry => (
-              <li key={entry[0]}>
-                <span className="jev-swatch" style={{ background: actionFill(actionMeta(entry[0])) }} />
-                <span className="jev-legend-label">{actionMeta(entry[0]).label}</span>
-                <b>{fmtNum(entry[1])}</b>
-                <span className="jev-legend-pct">{`${String(total > 0 ? Math.round(entry[1] / total * 100) : 0)}%`}</span>
-              </li>
-            ))}
-          </ul>
+          ))
         )}
+      </div>
+      {entries.length === 0 ? (
+        <p className="jev-note">窗口内还没有记录。</p>
+      ) : (
+        <ul className="jev-legend">
+          {entries.map((entry) => (
+            <li key={entry[0]}>
+              <span className="jev-swatch" style={{ background: actionFill(actionMeta(entry[0])) }} />
+              <span className="jev-legend-label">{actionMeta(entry[0]).label}</span>
+              <b>{fmtNum(entry[1])}</b>
+              <span className="jev-legend-pct">{`${String(total > 0 ? Math.round((entry[1] / total) * 100) : 0)}%`}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {buckets.length === 0 ? null : (
         <ul className="jev-mini">
-          {buckets.map(entry => {
+          {buckets.map((entry) => {
             const bucket = BUCKET_LABEL[entry[0]] ?? { label: entry[0], tone: 'muted' as Tone }
             const color = TONE[bucket.tone]
             return (
@@ -730,22 +713,24 @@ function TagCard({ summary }: { summary: TagSummary }): React.JSX.Element {
   )
 }
 
-/** 一条决策明细（点击展开全字段；展开时把详情滚进视野，不被视口裁掉）。 */
-function LogRow({ entry, open, onToggle }: {
+/** Rows remain keyboard-operable; evidence keeps original values and scope. */
+function LogRow({
+  entry,
+  open,
+  onToggle,
+}: {
   entry: LogEntry
   open: boolean
   onToggle: () => void
 }): React.JSX.Element {
   const detailRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
-    // 表格末尾的行展开后，详情会延伸到视口之外——自动滚到最近可见位置。
-    if (open && detailRef.current !== null) {
-      detailRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-    }
+    if (!open || detailRef.current === null) return
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    detailRef.current.scrollIntoView({ block: 'nearest', behavior: reducedMotion ? 'instant' : 'smooth' })
   }, [open])
   const meta = actionMeta(entry.action)
-  const latency = entry.latencyMs === undefined ? '—' : `${entry.cached === true ? '⚡ ' : ''}${String(entry.latencyMs)}ms`
-  const detail = entry.detail ?? ''
+  const scores = decisionScores(entry)
   return (
     <div
       className="jev-row"
@@ -753,45 +738,113 @@ function LogRow({ entry, open, onToggle }: {
       role="button"
       tabIndex={0}
       aria-expanded={open}
+      aria-label={`${clockOf(entry.ts)} ${entry.tool ?? tagMeta(entry.tag).label} ${meta.label}，${entry.mode === 'shadow' ? '观察记录' : '执行记录'}，${open ? '收起' : '展开'}证据`}
       onClick={onToggle}
-      onKeyDown={event => {
-        if (event.key !== 'Enter' && event.key !== ' ') return
-        event.preventDefault()
-        onToggle()
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onToggle()
+        }
       }}
     >
-      <span className="jev-cell jev-time" title={entry.ts}>{clockOf(entry.ts)}<i>{relativeOf(entry.ts)}</i></span>
-      <span className="jev-cell jev-col-tag jev-strong" style={{ color: TONE[tagMeta(entry.tag).tone] }}>{tagMeta(entry.tag).label}</span>
-      <span className="jev-cell jev-mono jev-col-tool" title={entry.tool ?? ''}>{entry.tool ?? '—'}</span>
-      <span className="jev-cell"><Badge tone={meta.tone}>{meta.label}</Badge></span>
-      <span className="jev-cell jev-num jev-col-lat">{latency}</span>
+      <span className="jev-cell jev-time" title={entry.ts}>
+        {clockOf(entry.ts)}
+        <i>{relativeOf(entry.ts)}</i>
+      </span>
+      <span className="jev-cell jev-col-tag" style={{ color: TONE[tagMeta(entry.tag).tone] }}>
+        {tagMeta(entry.tag).label}
+      </span>
+      <span className="jev-cell jev-mono jev-col-tool" title={entry.tool}>
+        {entry.tool ?? '—'}
+      </span>
+      <span className="jev-cell">
+        <Badge tone={meta.tone}>{meta.label}</Badge>
+      </span>
+      <span className="jev-cell jev-num jev-col-lat" title={entry.cached ? '缓存命中' : undefined}>
+        {entry.latencyMs === undefined ? '—' : `${entry.latencyMs} ms`}
+        {entry.cached && <Icon name="bolt" size={10} />}
+      </span>
       <span className="jev-cell jev-num jev-col-mode">{MODE_LABEL[entry.mode] ?? entry.mode}</span>
-      <span className="jev-cell jev-mono jev-detail jev-col-detail" title={detail}>{detail.length === 0 ? '—' : detail}</span>
+      <span className="jev-cell jev-mono jev-detail jev-col-detail" title={entry.detail}>
+        {entry.detail ?? '—'}
+      </span>
+      <span className="jev-row-chevron">
+        <Icon name="chevron" size={13} style={{ color: TONE.muted }} />
+      </span>
       {open && (
         <div ref={detailRef} className="jev-detail-full">
-          <div className="jev-kv"><span>模式</span><b>{`${MODE_LABEL[entry.mode] ?? entry.mode}（${entry.mode === 'shadow' ? '未生效' : '已生效'}）`}</b></div>
-          <div className="jev-kv"><span>模型</span><b>{entry.model ?? '—'}</b></div>
-          <div className="jev-kv"><span>工具</span><b>{entry.tool ?? '—'}</b></div>
-          <div className="jev-kv"><span>调用</span><b className="jev-mono" title={entry.callId ?? ''}>{shortId(entry.callId)}</b></div>
-          <div className="jev-kv"><span>会话</span><b className="jev-mono" title={entry.sessionId ?? ''}>{shortId(entry.sessionId)}</b></div>
-          <div className="jev-kv"><span>输入 Token</span><b>{entry.inputTokens === undefined ? '—' : fmtNum(entry.inputTokens)}</b></div>
-          <div className="jev-kv"><span>成本</span><b>{entry.costUsd === undefined ? '—' : `$${entry.costUsd.toFixed(6)}`}</b></div>
-          <div className="jev-kv" style={{ gridColumn: '1/-1' }}><span>详情</span><b className="jev-mono" style={{ whiteSpace: 'normal' }}>{detail.length === 0 ? '—' : detail}</b></div>
+          <div className="jev-chips">
+            <Badge tone={entry.mode === 'shadow' ? 'business' : 'brand'}>
+              {entry.mode === 'shadow' ? '观察记录，未执行干预' : '执行模式记录'}
+            </Badge>
+            <span className="jev-note">{entry.ts}</span>
+          </div>
+          {scores.length > 0 && (
+            <div className="jev-evidence" aria-label="判断证据">
+              {scores.map((score) => (
+                <div key={score.key}>
+                  <div className="jev-score-label">
+                    <span>{score.label}</span>
+                    <b title={String(score.value)}>{score.value.toFixed(2)}</b>
+                  </div>
+                  <div className="jev-score-track">
+                    <i
+                      style={{
+                        width: `${score.value * 100}%`,
+                        background: score.key === 'inj' || score.key === 'irrev' ? TONE.warn : TONE.brand,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="jev-detail-grid">
+            <div className="jev-kv">
+              <span>模型</span>
+              <b>{entry.model ?? '—'}</b>
+            </div>
+            <div className="jev-kv">
+              <span>输入 Token</span>
+              <b>{entry.inputTokens === undefined ? '—' : fmtNum(entry.inputTokens)}</b>
+            </div>
+            <div className="jev-kv">
+              <span>成本</span>
+              <b>{entry.costUsd === undefined ? '—' : fmtUsd(entry.costUsd)}</b>
+            </div>
+            <div className="jev-kv">
+              <span>工具</span>
+              <b className="jev-mono">{entry.tool ?? '—'}</b>
+            </div>
+            <div className="jev-kv">
+              <span>调用 ID</span>
+              <b className="jev-mono">{entry.callId ?? '—'}</b>
+            </div>
+            <div className="jev-kv">
+              <span>会话 ID</span>
+              <b className="jev-mono">{entry.sessionId ?? '—'}</b>
+            </div>
+          </div>
+          <pre className="jev-raw">{entry.detail ?? '没有附加详情'}</pre>
         </div>
       )}
     </div>
   )
 }
 
-/** 概览里的紧凑明细行（最近几条）。 */
-function MiniRow({ entry }: { entry: LogEntry }): React.JSX.Element {
+function MiniRow({ entry, onSelect }: { entry: LogEntry; onSelect: () => void }): React.JSX.Element {
   const meta = actionMeta(entry.action)
   return (
     <li>
-      <span className="jev-time" style={{ flex: 'none' }} title={entry.ts}>{clockOf(entry.ts)}</span>
-      <span className="jev-mono jev-strong" style={{ flex: '0 0 74px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={entry.tool ?? ''}>{entry.tool ?? '—'}</span>
-      <Badge tone={meta.tone}>{meta.label}</Badge>
-      <span className="jev-detail" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={entry.detail ?? ''}>{entry.detail ?? '—'}</span>
+      <button className="jev-mini-button" onClick={onSelect} title="查看这条决策的完整证据">
+        <span className="jev-time">{clockOf(entry.ts)}</span>
+        <span className="jev-cell jev-mono">{entry.tool ?? tagMeta(entry.tag).label}</span>
+        <span>
+          <Badge tone={meta.tone}>{meta.label}</Badge>
+        </span>
+        <span className="jev-detail">{entry.detail ?? '—'}</span>
+        <Icon name="chevron" size={13} />
+      </button>
     </li>
   )
 }
@@ -801,11 +854,14 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [stats, setStats] = useState<TagSummary[]>([])
   const [log, setLog] = useState<LogEntry[]>([])
   const [calib, setCalib] = useState<Calibration | null>(null)
+  const [reportModel, setReportModel] = useState('')
   const [impact, setImpact] = useState<Impact | null>(null)
   const [readiness, setReadiness] = useState<Readiness | null>(null)
   const [tab, setTab] = useState<string>('overview')
   const [loading, setLoading] = useState(true)
+  const loadSequence = useRef(0)
   const [loadErr, setLoadErr] = useState('')
+  const [dataWarning, setDataWarning] = useState('')
   const [busy, setBusy] = useState('')
   const [toast, setToast] = useState<{ tone: 'ok' | 'err' | 'warn'; text: string } | null>(null)
   const [updatedAt, setUpdatedAt] = useState(0)
@@ -818,9 +874,13 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [showKey, setShowKey] = useState(false)
   const [pingBusy, setPingBusy] = useState(false)
   const [pingResult, setPingResult] = useState<PingResult | null>(null)
+  const [providerDraft, setProviderDraft] = useState<ProviderChoice | null>(null)
   const [endpointDraft, setEndpointDraft] = useState('')
+  const [modelDraft, setModelDraft] = useState('')
+  const [credentialDraft, setCredentialDraft] = useState('')
   const [filterAction, setFilterAction] = useState('all')
   const [filterMode, setFilterMode] = useState('all')
+  const [filterTag, setFilterTag] = useState('all')
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
   // 决策记录分页：一次拉满 API 上限 500 条本地分页，翻页零延迟。
@@ -828,6 +888,7 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   const [pageJump, setPageJump] = useState('')
 
   const load = useCallback(async (silent: boolean): Promise<void> => {
+    const sequence = ++loadSequence.current
     if (!silent) setLoading(true)
     try {
       const [statusResult, statsResult, logResult, impactResult, readinessResult] = await Promise.allSettled([
@@ -837,22 +898,25 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         getJson('/impact'),
         getJson('/readiness'),
       ])
+      if (sequence !== loadSequence.current) return
       if (statusResult.status === 'fulfilled') {
         setStatus(statusResult.value as JevStatus)
         setLoadErr('')
       } else {
         const code = (statusResult.reason as { status?: number } | undefined)?.status
-        setLoadErr(code === 401
-          ? '需要登录后才能读取面板数据。'
-          : code === 404
-            ? '当前组合没有注册面板 API（需要 web 组合）。'
-            : '无法连接本地 API，请确认 dsh 宿主仍在运行。')
+        setLoadErr(
+          code === 401
+            ? '需要登录后才能读取面板数据。'
+            : code === 404
+              ? '当前组合没有注册面板 API（需要 web 组合）。'
+              : '无法连接本地 API，请确认 dsh 宿主仍在运行。',
+        )
       }
       if (statsResult.status === 'fulfilled') {
-        setStats(Array.isArray(statsResult.value) ? statsResult.value as TagSummary[] : [])
+        setStats(Array.isArray(statsResult.value) ? (statsResult.value as TagSummary[]) : [])
       }
       if (logResult.status === 'fulfilled') {
-        const entries = Array.isArray(logResult.value) ? logResult.value as LogEntry[] : []
+        const entries = Array.isArray(logResult.value) ? (logResult.value as LogEntry[]) : []
         entries.sort((left, right) => (left.ts < right.ts ? 1 : left.ts > right.ts ? -1 : 0))
         setLog(entries)
       }
@@ -862,13 +926,27 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       if (readinessResult.status === 'fulfilled') {
         setReadiness(readinessResult.value as Readiness)
       }
-      setUpdatedAt(Date.now())
+      const unavailable = [
+        [statsResult, '环节统计'],
+        [logResult, '决策记录'],
+        [impactResult, '效果汇总'],
+        [readinessResult, '就绪度'],
+      ] as const
+      setDataWarning(
+        unavailable
+          .filter(([result]) => result.status === 'rejected')
+          .map(([, label]) => label)
+          .join('、'),
+      )
+      if (statusResult.status === 'fulfilled') setUpdatedAt(Date.now())
     } finally {
-      if (!silent) setLoading(false)
+      if (sequence === loadSequence.current) setLoading(false)
     }
   }, [])
 
-  useEffect(() => { void load(false) }, [])
+  useEffect(() => {
+    void load(false)
+  }, [])
 
   // 自动刷新：页面不可见时跳过，避免后台空转。
   useEffect(() => {
@@ -877,46 +955,52 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
       void load(true)
     }, REFRESH_MS)
-    return () => { clearInterval(timer) }
+    return () => {
+      clearInterval(timer)
+    }
   }, [autoRefresh, load])
 
   // 提示 4 秒后自动消失。
   useEffect(() => {
     if (toast === null) return undefined
-    const timer = setTimeout(() => { setToast(null) }, 4_000)
-    return () => { clearTimeout(timer) }
+    const timer = setTimeout(() => {
+      setToast(null)
+    }, 4_000)
+    return () => {
+      clearTimeout(timer)
+    }
   }, [toast])
 
   /** 乐观更新 + 失败回滚的统一写入口。 */
-  const applyPatch = useCallback(async (
-    busyKey: string,
-    patch: Record<string, unknown>,
-    optimistic?: Partial<JevStatus>,
-  ): Promise<boolean> => {
-    const previous = status
-    setBusy(busyKey)
-    setToast(null)
-    if (previous !== null && optimistic !== undefined) setStatus({ ...previous, ...optimistic })
-    try {
-      await putConfig(patch)
-      // 诚实反馈：设置服务不落盘时（persistPath 探测为 null）明确说"重启丢失"。
-      const volatile = previous !== null && previous.persistPath === null
-      setToast({
-        tone: volatile ? 'warn' : 'ok',
-        text: volatile
-          ? '已生效（仅本运行）：设置服务不落盘，重启丢失——请写入 cordis.patch.yml 的 jev-interceptor 行'
-          : '已保存',
-      })
-      void load(true)
-      return true
-    } catch (error) {
-      if (previous !== null) setStatus(previous)
-      setToast({ tone: 'err', text: `保存失败：${error instanceof Error ? error.message : String(error)}` })
-      return false
-    } finally {
-      setBusy('')
-    }
-  }, [status, load])
+  const applyPatch = useCallback(
+    async (
+      busyKey: string,
+      patch: Record<string, unknown>,
+      optimistic?: Partial<JevStatus>,
+    ): Promise<boolean> => {
+      const previous = status
+      setBusy(busyKey)
+      setToast(null)
+      if (previous !== null && optimistic !== undefined) setStatus({ ...previous, ...optimistic })
+      try {
+        const persisted = await putConfig(patch)
+        const volatile = persisted === false || (persisted === undefined && previous?.persistPath === null)
+        setToast({
+          tone: volatile ? 'warn' : 'ok',
+          text: volatile ? MEMORY_ONLY : '已保存',
+        })
+        await load(true)
+        return true
+      } catch (error) {
+        if (previous !== null) setStatus(previous)
+        setToast({ tone: 'err', text: `保存失败：${error instanceof Error ? error.message : String(error)}` })
+        return false
+      } finally {
+        setBusy('')
+      }
+    },
+    [status, load],
+  )
 
   const saveKey = useCallback(async (): Promise<void> => {
     const value = keyDraft.trim()
@@ -945,29 +1029,27 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(draft === undefined ? {} : { apiKey: draft }),
       })
-      setPingResult(await response.json() as PingResult)
+      if (!response.ok) {
+        setPingResult({ ok: false, latencyMs: 0, error: `http-${response.status}` })
+      } else {
+        const result = (await response.json()) as PingResult
+        setPingResult(result)
+        if (result.ok && result.error === undefined && draft === undefined) void load(true)
+      }
     } catch {
       setPingResult({ ok: false, latencyMs: 0, error: 'network' })
     } finally {
       setPingBusy(false)
     }
-  }, [keyDraft, keyLocked])
+  }, [keyDraft, keyLocked, load])
 
-  const saveEndpoint = useCallback(async (): Promise<void> => {
-    const value = endpointDraft.trim()
-    if (value.length === 0) {
-      setToast({ tone: 'err', text: '端点不能为空。' })
-      return
-    }
-    const ok = await applyPatch('endpoint', { endpoint: value })
-    if (ok) setEndpointDraft('')
-  }, [endpointDraft, applyPatch])
-
-  const runCalibration = useCallback(async (): Promise<void> => {
+  const runCalibration = useCallback(async (model: string): Promise<void> => {
     setCalibBusy(true)
     setToast(null)
     try {
-      setCalib(await getJson('/calibration') as Calibration)
+      const path = model === '' ? '/calibration' : `/calibration?model=${encodeURIComponent(model)}`
+      setCalib((await getJson(path)) as Calibration)
+      setReportModel(model)
     } catch (error) {
       setToast({ tone: 'err', text: `校准失败：${error instanceof Error ? error.message : String(error)}` })
     } finally {
@@ -976,43 +1058,60 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   }, [])
 
   /** 一键应用单条校准建议：PUT 阈值（热生效），成功后重新生成报告看采纳标记。 */
-  const applyAdvice = useCallback(async (param: string, suggested: number): Promise<void> => {
-    setToast(null)
-    // 入口即置忙：PUT 往返期间禁用所有应用/生成按钮（防双击重复 PUT 与并发报告）。
-    setCalibBusy(true)
-    try {
-      await putConfig({ [param]: suggested })
-      setToast({ tone: 'ok', text: `已应用 ${param} → ${suggested.toFixed(2)}（下一个调用即生效）` })
-      await runCalibration()
-    } catch (error) {
-      setToast({ tone: 'err', text: `应用失败：${error instanceof Error ? error.message : String(error)}` })
-    } finally {
-      setCalibBusy(false)
-    }
-  }, [runCalibration])
+  const applyAdvice = useCallback(
+    async (param: string, current: number, suggested: number): Promise<void> => {
+      setToast(null)
+      // 入口即置忙：PUT 往返期间禁用所有应用/生成按钮（防双击重复 PUT 与并发报告）。
+      setCalibBusy(true)
+      try {
+        const model = calib?.scope?.model
+        const scope = model == null ? {} : { calibrationModel: model, calibrationCurrent: current }
+        const persisted = await putConfig({ [param]: suggested, ...scope })
+        const text = `已应用 ${param} → ${suggested.toFixed(2)}。${persisted === false ? MEMORY_ONLY : ''}`
+        try {
+          setCalib(await getJson('/calibration') as Calibration)
+          setReportModel('')
+          setToast({ tone: persisted === false ? 'warn' : 'ok', text })
+        } catch {
+          setToast({ tone: 'warn', text: `${text}报告未能刷新。` })
+        }
+      } catch (error) {
+        setToast({ tone: 'err', text: `应用失败：${error instanceof Error ? error.message : String(error)}` })
+      } finally {
+        setCalibBusy(false)
+      }
+    },
+    [calib],
+  )
 
   /** 更新预批准名单（整组替换，热生效）；add=true 加入 / false 移除。 */
-  const applyAllowlist = useCallback(async (tool: string, add: boolean): Promise<void> => {
-    if (status === null) return
-    const current = status.preapproveAllowlist ?? []
-    const next = add
-      ? [...new Set([...current, tool])].sort()
-      : current.filter(item => item !== tool)
-    setToast(null)
-    setBusy('allowlist')
-    try {
-      await putConfig({ preapproveToolAllowlist: next })
-      setStatus({ ...status, preapproveAllowlist: next })
-      setToast({
-        tone: 'ok',
-        text: add ? `已把 ${tool} 加入预批准名单（下一个审批请求即生效）` : `已把 ${tool} 移出预批准名单`,
-      })
-    } catch (error) {
-      setToast({ tone: 'err', text: `名单更新失败：${error instanceof Error ? error.message : String(error)}` })
-    } finally {
-      setBusy('')
-    }
-  }, [status])
+  const applyAllowlist = useCallback(
+    async (tool: string, add: boolean): Promise<void> => {
+      if (status === null) return
+      const current = status.preapproveAllowlist ?? []
+      const next = add ? [...new Set([...current, tool])].sort() : current.filter((item) => item !== tool)
+      setToast(null)
+      setBusy('allowlist')
+      try {
+        const model = calib?.scope?.model
+        const scope = add && model != null ? { calibrationModel: model } : {}
+        const persisted = await putConfig({ preapproveToolAllowlist: next, ...scope })
+        setStatus({ ...status, preapproveAllowlist: next })
+        setToast({
+          tone: persisted === false ? 'warn' : 'ok',
+          text: `${add ? `已把 ${tool} 加入预批准名单。` : `已把 ${tool} 移出预批准名单。`}${persisted === false ? MEMORY_ONLY : ''}`,
+        })
+      } catch (error) {
+        setToast({
+          tone: 'err',
+          text: `名单更新失败：${error instanceof Error ? error.message : String(error)}`,
+        })
+      } finally {
+        setBusy('')
+      }
+    },
+    [status, calib],
+  )
 
   /** 跨环节汇总：总数 / 自动批准 / 转人工 / 拒绝 / 降级。 */
   const aggregate = useMemo(() => {
@@ -1036,16 +1135,18 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
     return counts
   }, [log])
 
-  const filteredLog = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    return log.filter(entry => (filterAction === 'all' || entry.action === filterAction)
-      && (filterMode === 'all' || entry.mode === filterMode)
-      && (needle.length === 0
-        || (entry.tool ?? '').toLowerCase().includes(needle)
-        || (entry.detail ?? '').toLowerCase().includes(needle)))
-  }, [log, filterAction, filterMode, query])
+  const filteredLog = useMemo(
+    () =>
+      filterDecisions(log, {
+        action: filterAction,
+        mode: filterMode,
+        tag: filterTag,
+        query,
+      }),
+    [log, filterAction, filterMode, filterTag, query],
+  )
 
-  /** 每页条数：20 条保证一屏内完整可见（表格 + 分页栏不依赖滚动）。 */
+  /** 每页 20 条，翻页不需要再次请求宿主。 */
   const LOG_PAGE_SIZE = 20
   const totalPages = Math.max(1, Math.ceil(filteredLog.length / LOG_PAGE_SIZE))
   const safePage = Math.min(Math.max(1, logPage), totalPages)
@@ -1055,614 +1156,1064 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   )
 
   /** 筛选变化回第 1 页（避免停在一个不存在的高页码上看空表）。 */
-  useEffect(() => { setLogPage(1) }, [filterAction, filterMode, query])
+  useEffect(() => {
+    setLogPage(1)
+  }, [filterAction, filterMode, filterTag, query])
 
   /** 翻页：切页并把 tab 内容区滚回顶部（新页内容从表格第一行开始看）。 */
-  const gotoPage = useCallback((page: number): void => {
-    setLogPage(Math.min(Math.max(1, page), totalPages))
-    setPageJump('')
-    if (typeof document !== 'undefined') {
-      const body = document.querySelector('.jev-tab-body')
-      if (body !== null) body.scrollTop = 0
-    }
-  }, [totalPages])
+  const gotoPage = useCallback(
+    (page: number): void => {
+      setLogPage(Math.min(Math.max(1, page), totalPages))
+      setPageJump('')
+      if (typeof document !== 'undefined') {
+        const body = document.querySelector('.jev-tab-body')
+        if (body !== null) body.scrollTop = 0
+      }
+    },
+    [totalPages],
+  )
 
   const recent = useMemo(() => log.slice(0, 6), [log])
 
   const provider = status === null ? 'typesafe' : status.provider
   const mode = status === null ? 'shadow' : status.mode
   const keySource = status === null ? 'none' : status.keySource
-  const activeFilters = filterAction !== 'all' || filterMode !== 'all' || query.trim().length > 0
+  const selectedProvider = providerDraft ?? provider
+  const choosingCustom = selectedProvider === 'custom'
+  const endpointInput = endpointDraft.trim()
+  const modelInput = modelDraft.trim()
+  const credentialInput = credentialDraft.trim()
+  const connectionDirty = selectedProvider !== provider
+    || (choosingCustom && (endpointInput !== '' || modelInput !== '' || credentialInput !== ''))
+  let draftOrigin = status?.endpointOrigin
+  if (choosingCustom && endpointInput !== '') {
+    try { draftOrigin = new URL(endpointInput).origin } catch { draftOrigin = null }
+  }
+  const changesTarget = selectedProvider !== provider || draftOrigin !== status?.endpointOrigin
+  const customReady = (!changesTarget || (endpointInput !== '' && draftOrigin !== null))
+    && (endpointInput !== '' || status?.endpointOrigin != null)
+    && (modelInput !== '' || (provider === 'custom' && !!status?.model))
+    && (!changesTarget || credentialInput !== '')
+  const clearConnectionDraft = (): void => {
+    setProviderDraft(null)
+    setEndpointDraft('')
+    setModelDraft('')
+    setCredentialDraft('')
+  }
+  const clearKeyDraft = (): void => {
+    setKeyDraft('')
+    setKeyMask('')
+    setKeyLocked(false)
+    setShowKey(false)
+    setPingResult(null)
+  }
+  const useCredentialReference = async (): Promise<void> => {
+    if (await applyPatch('key-reference', { apiKey: '' })) clearKeyDraft()
+  }
+  const saveConnection = async (): Promise<void> => {
+    if (!connectionDirty || (choosingCustom && !customReady) || busy !== '' || pingBusy) return
+    const patch: Record<string, unknown> = { provider: selectedProvider }
+    if (choosingCustom) {
+      if (endpointInput !== '') patch.endpoint = endpointInput
+      if (modelInput !== '') patch.model = modelInput
+      if (credentialInput !== '') patch.apiKeyEnv = credentialInput
+    } else {
+      Object.assign(patch, { endpoint: '', model: '', apiKeyEnv: '' })
+    }
+    if (changesTarget) patch.apiKey = ''
+    if (await applyPatch('connection', patch)) {
+      clearConnectionDraft()
+      setPingResult(null)
+      if (changesTarget) clearKeyDraft()
+    }
+  }
+
+  useEffect(() => { setPingResult(null) }, [status?.provider, status?.model, status?.endpointOrigin])
+  const canApplyCalibration = calib?.scope === undefined
+    || (calib.scope.model !== null && calib.scope.model === (status?.activeModel === undefined ? calib.scope.currentModel : status.activeModel))
+  const activeFilters =
+    filterAction !== 'all' || filterMode !== 'all' || filterTag !== 'all' || query.trim().length > 0
   const resetFilters = (): void => {
     setFilterAction('all')
     setFilterMode('all')
+    setFilterTag('all')
     setQuery('')
+    setExpanded(null)
   }
-  const filterChips = ['auto-approve', 'ask', 'deny', 'delegate', 'degraded']
-    .filter(action => (actionCounts[action] ?? 0) > 0)
+  const filterChips = Object.keys(actionCounts).sort(
+    (left, right) => (actionCounts[right] ?? 0) - (actionCounts[left] ?? 0),
+  )
 
-  /** 快速开始 + 就绪度：装完 5 分钟跑通闭环的引导（完成后自动消失）。 */
+  const openRecord = (entry: LogEntry): void => {
+    resetFilters()
+    const index = log.indexOf(entry)
+    const page = Math.floor(Math.max(0, index) / LOG_PAGE_SIZE) + 1
+    setLogPage(page)
+    setExpanded(entryKey(entry, Math.max(0, index) % LOG_PAGE_SIZE))
+    setTab('log')
+  }
+
+  const selectTool = (tool: string): void => {
+    resetFilters()
+    setQuery(tool)
+    setTab('log')
+  }
+
+  const exportLog = (): void => {
+    const blob = new Blob([JSON.stringify(filteredLog, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `jev-decisions-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    setTimeout(() => {
+      URL.revokeObjectURL(url)
+    }, 1_000)
+    setToast({ tone: 'ok', text: `已导出当前筛选的 ${filteredLog.length} 条记录` })
+  }
+
   const renderOnboarding = (): React.JSX.Element | null => {
     if (status === null) return null
     const keyReady = status.keyConfigured || status.keySource === 'credentials' || status.keySource === 'env'
-    const enforced = status.enabled && status.mode === 'enforce'
-    if (keyReady && enforced && (readiness === null || readiness.ready)) return null
-    const step = (done: boolean, index: string, text: string, action?: React.JSX.Element): React.JSX.Element => (
-      <li style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
-        <span style={{ color: done ? TONE.ok : TONE.brand, fontWeight: 600, flex: 'none', width: 18 }}>{done ? '✓' : index}</span>
-        <span style={{ flex: 1, color: done ? 'var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))' : 'inherit', textDecoration: done ? 'line-through' : 'none' }}>{text}</span>
-        {done ? null : action}
-      </li>
-    )
+    if (keyReady && status.enabled && status.mode === 'enforce') return null
+    if (keyReady && status.enabled && aggregate.calls > 0)
+      return (
+        <div className="jev-banner">
+          <Icon name="info" />
+          <span>{readiness?.reason ?? '正在积累观察数据，确认判断符合预期后再切换执行模式。'}</span>
+          <button
+            className="jev-btn jev-btn--quiet"
+            onClick={() => {
+              setTab('calibration')
+            }}
+          >
+            查看校准
+            <Icon name="arrow" size={14} />
+          </button>
+        </div>
+      )
+    const steps = [
+      {
+        done: keyReady,
+        title: '连接 Jev',
+        hint: '在设置中配置 Key 并测试连接',
+        action: (
+          <button
+            className="jev-btn"
+            onClick={() => {
+              setTab('settings')
+            }}
+          >
+            配置连接
+          </button>
+        ),
+      },
+      {
+        done: status.enabled,
+        title: '开始观察',
+        hint: '记录判断，保持原有审批流程',
+        action: (
+          <button
+            className="jev-btn"
+            disabled={busy !== ''}
+            onClick={() => {
+              void applyPatch('enabled', { enabled: true, mode: 'shadow' }, { enabled: true, mode: 'shadow' })
+            }}
+          >
+            启用观察
+          </button>
+        ),
+      },
+      {
+        done: false,
+        title: '评估后执行',
+        hint: readiness?.reason ?? '积累样本后，检查风险与一致率',
+        action:
+          keyReady && status.enabled && readiness?.ready ? (
+            <button
+              className="jev-btn"
+              disabled={busy !== ''}
+              onClick={() => {
+                void applyPatch('mode', { mode: 'enforce' }, { mode: 'enforce' })
+              }}
+            >
+              切换执行
+            </button>
+          ) : null,
+      },
+    ]
     return (
-      <section className="jev-card">
-        <header className="jev-card-head">
-          <div>
-            <div className="jev-card-title">快速开始</div>
-            <div className="jev-card-sub">三步跑通：配 Key → 开观察 → 数字健康后切执行</div>
-          </div>
-        </header>
-        <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {step(keyReady, '1', '配置 API Key（设置 tab，可先测试连接）',
-            <button className="jev-btn" onClick={() => { setTab('settings') }}>去配置</button>)}
-          {step(status.enabled, '2', '启用插件（观察模式只记录，不影响任何行为）',
-            <button className="jev-btn jev-btn--primary" disabled={busy !== ''} onClick={() => { void applyPatch('enabled', { enabled: true }, { enabled: true }) }}>启用</button>)}
-          {step(enforced, '3', readiness !== null && readiness.ready
-            ? '影子数据健康，建议切到执行模式'
-            : readiness !== null ? readiness.reason : '观察一段时间后评估是否切执行',
-            status.mode === 'shadow' && readiness?.ready === true
-              ? <button className="jev-btn jev-btn--primary" disabled={busy !== ''} onClick={() => { void applyPatch('mode', { mode: 'enforce' }, { mode: 'enforce' }) }}>切执行</button>
-              : undefined)}
+      <section className="jev-card jev-onboarding">
+        <div className="jev-card-title">开始使用</div>
+        <ol className="jev-onboarding-steps">
+          {steps.map((step, index) => (
+            <li key={step.title}>
+              <span className="jev-step-number" style={{ color: step.done ? TONE.ok : undefined }}>
+                {step.done ? <Icon name="check" size={13} /> : index + 1}
+              </span>
+              <div className="jev-step-copy">
+                <b>{step.title}</b>
+                <p className="jev-note">{step.hint}</p>
+                {!step.done && step.action}
+              </div>
+            </li>
+          ))}
         </ol>
       </section>
     )
   }
 
-  const renderOverview = (): React.JSX.Element => {
-    const onboarding = renderOnboarding()
-    if (stats.length === 0) {
-      return (
+  const renderImpact = (): React.JSX.Element => (
+    <section className="jev-card jev-card--impact">
+      <header className="jev-card-head">
+        <div>
+          <div className="jev-card-title">实际效果</div>
+          <div className="jev-card-sub">仅统计执行模式下生效的动作</div>
+        </div>
+        <Icon name="shield" style={{ marginLeft: 'auto', color: TONE.ok }} />
+      </header>
+      {impact === null ? (
+        <p className="jev-note">效果汇总暂不可用，请刷新重试。</p>
+      ) : (
         <Fragment>
-          {onboarding}
-          <div className="jev-empty">
-            <b>还没有决策记录</b>
+          <div className="jev-impact-values">
             <div>
-            {status !== null && status.enabled
-              ? '已启用：下一次工具调用或 @ 引用就会留下第一条判断。'
-              : '启用后，每次工具调用都会先过一遍 Jev，并在「决策记录」里留痕。'}
+              <b style={{ color: TONE.ok }}>{fmtNum(impact.enforce.autoApproved)}</b>
+              <span>省去审批</span>
+            </div>
+            <div>
+              <b style={{ color: TONE.warn }}>{fmtNum(impact.enforce.asked)}</b>
+              <span>转交人工</span>
+            </div>
+            <div>
+              <b style={{ color: TONE.err }}>{fmtNum(impact.enforce.denied)}</b>
+              <span>风险拦截</span>
+            </div>
           </div>
-          <div className="jev-row-actions">
-            {status !== null && !status.enabled
-              ? (
-                <button
-                  className="jev-btn jev-btn--primary"
-                  disabled={busy !== ''}
-                  onClick={() => { void applyPatch('enabled', { enabled: true }, { enabled: true }) }}
-                >启用 Jev</button>
-              )
-              : null}
-            {keySource === 'none' && (
-              <button className="jev-btn" onClick={() => { setTab('settings') }}>先配置 API Key</button>
+          <div className="jev-impact-facts">
+            <Fact label="全部模式成本">{fmtUsdCard(impact.cost) || '未报告'}</Fact>
+            <Fact label="响应 p50 / p95">
+              {impact.latency.p50 === undefined
+                ? '—'
+                : `${impact.latency.p50} / ${impact.latency.p95 ?? '—'} ms`}
+            </Fact>
+            <Fact label="免费缓存命中">{fmtNum(impact.cost.cachedDecisions)} 次</Fact>
+          </div>
+          <div className="jev-chips">
+            {misApprovalBadge(impact)}
+            {(impact.agreement.enforce['friction-human-approved'] ?? 0) > 0 && (
+              <Badge tone="warn">
+                多余人工 {fmtNum(impact.agreement.enforce['friction-human-approved'])}
+              </Badge>
+            )}
+            {(impact.agreement.shadow['would-over-approve'] ?? 0) > 0 && (
+              <Badge tone="business">
+                观察对照误批 {fmtNum(impact.agreement.shadow['would-over-approve'])}
+              </Badge>
+            )}
+            {impact.enforce.stagnationAlerts > 0 && (
+              <Badge tone="warn">停滞提醒 {fmtNum(impact.enforce.stagnationAlerts)}</Badge>
             )}
           </div>
-        </div>
+          <p className="jev-note">{oneLineSummary(impact)}</p>
+          <p className="jev-card-sub">
+            汇总 {fmtNum(impact.windowSize)} 条，{impact.firstTs?.slice(0, 10) ?? '—'} 至{' '}
+            {impact.lastTs?.slice(0, 10) ?? '—'}（UTC）
+          </p>
         </Fragment>
-      )
-    }
-    return (
-      <Fragment>
-        {onboarding}
-        {impact !== null && impact.windowSize > 0 && (
-          <section className="jev-card">
-            <header className="jev-card-head">
-              <div>
-                <div className="jev-card-title">净收益</div>
-                <div className="jev-card-sub">
-                  {`最近 ${fmtNum(impact.windowSize)} 条 · enforce 期口径 · ${impact.firstTs !== undefined ? impact.firstTs.slice(0, 10) : '—'} 起`
-                    + `${impact.lastTs !== undefined ? ` ~ ${impact.lastTs.slice(0, 10)}` : ''}`
-                    + ` · ${String(impact.days)} 个活跃日 ${String(impact.sessions)} 个会话`}
-                </div>
-              </div>
-              <div className="jev-card-metrics">
-                {impact.latency.p50 !== undefined ? <div>{`p50 ${String(impact.latency.p50)}ms`}</div> : null}
-                {fmtUsdCard(impact.cost)}
-              </div>
-            </header>
-            <div className="jev-chips">
-              <Badge tone="ok">{`省点击 ${fmtNum(impact.enforce.autoApproved)} 次`}</Badge>
-              <Badge tone="err">{`拦截 ${fmtNum(impact.enforce.denied)} 次`}</Badge>
-              {impact.enforce.stagnationAlerts > 0
-                ? <Badge tone="warn">{`停滞提醒 ${fmtNum(impact.enforce.stagnationAlerts)} 次`}</Badge>
-                : null}
-              {misApprovalBadge(impact)}
-              {(impact.agreement.enforce['friction-human-approved'] ?? 0) > 0
-                ? <Badge tone="warn">{`多余人工 ${fmtNum(impact.agreement.enforce['friction-human-approved'] ?? 0)}`}</Badge>
-                : null}
-              {(impact.agreement.shadow['would-over-approve'] ?? 0) > 0
-                ? <Badge tone="muted">{`shadow 对照·会批人拒 ${fmtNum(impact.agreement.shadow['would-over-approve'] ?? 0)}`}</Badge>
-                : null}
-            </div>
-            <p className="jev-note">{oneLineSummary(impact)}</p>
-          </section>
-        )}
-        <DailyTrend log={log} />
-        <div className="jev-grid">
-          {stats.map(summary => <TagCard key={summary.tag} summary={summary} />)}
-          <ToolTopCard log={log} />
-        </div>
-        <p className="jev-note" style={{ marginTop: -4 }}>
-          {`统计窗口：最近 ${fmtNum(log.length)} 条决策${log.length > 0 && log.at(-1) !== undefined ? `（${log.at(-1)!.ts.slice(0, 10)} ~ ${log[0]!.ts.slice(0, 10)}）` : ''}；面板上限 500 条，更早用 /jev-log 查看。`}
-        </p>
-        <section className="jev-card">
-          <header className="jev-card-head">
-            <div>
-              <div className="jev-card-title">最近决策</div>
-              <div className="jev-card-sub">
-                {recent.length === 0 ? '暂无记录' : `最新 ${String(recent.length)} 条，按时间倒序`}
-              </div>
-            </div>
-            <button
-              className="jev-btn"
-              style={{ marginLeft: 'auto' }}
-              disabled={log.length === 0}
-              onClick={() => { setTab('log') }}
-            >{`查看全部${log.length > 0 ? `（${String(log.length)}）` : ''}`}</button>
-          </header>
-          {recent.length === 0
-            ? <p className="jev-note">启用后这里会出现最近几条判断。</p>
-            : <ul className="jev-mini">{recent.map((entry, index) => <MiniRow key={entryKey(entry, index)} entry={entry} />)}</ul>}
-        </section>
-      </Fragment>
-    )
-  }
+      )}
+    </section>
+  )
 
-  const renderLog = (): React.JSX.Element => {
-    return (
-      <Fragment>
-        <div className="jev-toolbar">
-          <div className="jev-chips">
-            <button
-              className="jev-chip"
-              data-on={filterAction === 'all' ? '1' : '0'}
-              onClick={() => { setFilterAction('all') }}
-            >全部<b>{fmtNum(log.length)}</b></button>
-            {filterChips.map(action => (
-              <button
-                key={action}
-                className="jev-chip"
-                data-on={filterAction === action ? '1' : '0'}
-                onClick={() => { setFilterAction(action) }}
-              >{actionMeta(action).label}<b>{fmtNum(actionCounts[action] ?? 0)}</b></button>
+  const renderOverview = (): React.JSX.Element => (
+    <div className="jev-page">
+      <div className="jev-section-head">
+        <div>
+          <h3>决策概况</h3>
+          <p>风险如何处理，每一次都有迹可循。</p>
+        </div>
+        <span className="jev-scope">环节统计窗口 {fmtNum(aggregate.calls)} 条，含观察记录</span>
+      </div>
+      {renderOnboarding()}
+      <div className="jev-metrics">
+        <Kpi label="决策总数" value={aggregate.calls} icon="activity" hint="当前环节统计窗口" />
+        <Kpi label="自动批准" value={aggregate.auto} tone="ok" icon="check" hint="含观察模式的预期动作" />
+        <Kpi label="转交人工" value={aggregate.ask} tone="warn" icon="pause" hint="风险不确定，交回人工" />
+        <Kpi label="风险拒绝" value={aggregate.deny} tone="err" icon="shield" hint="含观察模式的预期动作" />
+        <Kpi
+          label="降级回退"
+          value={aggregate.degraded}
+          tone="muted"
+          icon="refresh"
+          hint="未完成判断，回到原生流程"
+        />
+      </div>
+      {stats.length === 0 && !loading ? (
+        <div className="jev-empty">
+          <Icon name="activity" size={30} />
+          <b>等待第一条决策</b>
+          <div>启用后，工具调用或会话引用会在这里留下记录。</div>
+          <button
+            className="jev-btn"
+            onClick={() => {
+              setTab('settings')
+            }}
+          >
+            检查连接设置
+          </button>
+        </div>
+      ) : (
+        <Fragment>
+          <div className="jev-overview-main">
+            <DailyTrend log={log} />
+            {renderImpact()}
+          </div>
+          <div className="jev-section-head">
+            <h3>各环节表现</h3>
+            <span className="jev-scope">与上方概况同一统计窗口</span>
+          </div>
+          <div className="jev-tag-grid">
+            {stats.map((summary) => (
+              <TagCard key={summary.tag} summary={summary} />
             ))}
           </div>
-          <input
-            className="jev-search"
-            type="search"
-            placeholder="搜索工具名或详情…"
-            value={query}
-            onChange={event => { setQuery(event.target.value) }}
-          />
+          <div className="jev-grid">
+            <section className="jev-card">
+              <header className="jev-card-head">
+                <div>
+                  <div className="jev-card-title">最近决策</div>
+                  <div className="jev-card-sub">点击记录，查看判断证据</div>
+                </div>
+                <button
+                  className="jev-btn jev-btn--quiet"
+                  style={{ marginLeft: 'auto' }}
+                  onClick={() => {
+                    setTab('log')
+                  }}
+                >
+                  全部记录
+                  <Icon name="arrow" size={14} />
+                </button>
+              </header>
+              <ul className="jev-mini">
+                {recent.map((entry, index) => (
+                  <MiniRow
+                    key={entryKey(entry, index)}
+                    entry={entry}
+                    onSelect={() => {
+                      openRecord(entry)
+                    }}
+                  />
+                ))}
+              </ul>
+            </section>
+            <ToolTopCard log={log} onSelect={selectTool} />
+          </div>
+          <p className="jev-note">
+            活动图与工具分布取自最近 {fmtNum(log.length)} 条记录。观察模式只记录预期动作，实际效果单独统计。
+          </p>
+        </Fragment>
+      )}
+    </div>
+  )
+
+  const renderLog = (): React.JSX.Element => (
+    <div className="jev-page">
+      <div className="jev-section-head">
+        <div>
+          <h3>决策记录</h3>
+          <p>从动作追到证据，核对每一次判断。</p>
+        </div>
+        <button className="jev-btn" disabled={filteredLog.length === 0} onClick={exportLog}>
+          <Icon name="download" size={14} />
+          导出 JSON
+        </button>
+      </div>
+      <div className="jev-filterbox">
+        <div className="jev-chips" role="group" aria-label="按决策动作筛选">
+          <button
+            className="jev-chip"
+            data-on={filterAction === 'all' ? '1' : '0'}
+            aria-pressed={filterAction === 'all'}
+            onClick={() => {
+              setFilterAction('all')
+            }}
+          >
+            全部<b>{fmtNum(log.length)}</b>
+          </button>
+          {filterChips.map((action) => (
+            <button
+              key={action}
+              className="jev-chip"
+              data-on={filterAction === action ? '1' : '0'}
+              aria-pressed={filterAction === action}
+              onClick={() => {
+                setFilterAction(action)
+              }}
+            >
+              <i className="jev-swatch" style={{ background: actionFill(actionMeta(action)) }} />
+              {actionMeta(action).label}
+              <b>{fmtNum(actionCounts[action])}</b>
+            </button>
+          ))}
+        </div>
+        <div className="jev-toolbar">
+          <div className="jev-search-wrap">
+            <Icon name="search" size={15} />
+            <input
+              className="jev-search"
+              type="search"
+              aria-label="搜索决策记录"
+              placeholder="搜索工具、详情、会话或调用 ID"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value)
+              }}
+            />
+          </div>
+          <select
+            className="jev-select"
+            value={filterTag}
+            aria-label="按决策环节筛选"
+            onChange={(event) => {
+              setFilterTag(event.target.value)
+            }}
+          >
+            <option value="all">全部环节</option>
+            {[...new Set(log.map((entry) => entry.tag))].map((tag) => (
+              <option key={tag} value={tag}>
+                {tagMeta(tag).label}
+              </option>
+            ))}
+          </select>
           <Segmented
             label="按生效模式筛选"
             value={filterMode}
             options={[
-              { value: 'all', label: '全部' },
+              { value: 'all', label: '全部模式' },
               { value: 'shadow', label: '观察' },
               { value: 'enforce', label: '执行' },
             ]}
             onChange={setFilterMode}
           />
-          {activeFilters
-            ? <button className="jev-btn" onClick={resetFilters}>清除筛选</button>
-            : null}
+          {activeFilters && (
+            <button className="jev-btn jev-btn--quiet" onClick={resetFilters}>
+              重置
+            </button>
+          )}
         </div>
-        {log.length === 0
-          ? (
-            <div className="jev-empty">
-              <b>还没有决策记录</b>
-              <div>启用 Jev 之后，每次工具调用与 @ 引用都会在这里留一条。</div>
-            </div>
-          )
-          : rows.length === 0
-            ? (
-              <div className="jev-empty">
-                <b>没有匹配的决策</b>
-                <div>换个筛选条件或清空搜索词。</div>
-                <div className="jev-row-actions">
-                  <button className="jev-btn" onClick={resetFilters}>清除筛选</button>
-                </div>
-              </div>
+      </div>
+      <div className="jev-section-head">
+        <span className="jev-note" aria-live="polite">
+          {activeFilters
+            ? `匹配 ${fmtNum(filteredLog.length)} 条 / 已载入 ${fmtNum(log.length)} 条`
+            : `已载入最近 ${fmtNum(log.length)} 条`}
+        </span>
+        <span className="jev-scope">时间倒序，点击或按 Enter 展开证据</span>
+      </div>
+      {log.length === 0 ? (
+        <div className="jev-empty">
+          <Icon name="log" size={30} />
+          <b>还没有决策记录</b>
+          <div>启用后，工具调用与会话引用会在这里留痕。</div>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="jev-empty">
+          <Icon name="search" size={30} />
+          <b>没有匹配的决策</b>
+          <div>尝试其他工具名、调用 ID，或清除筛选。</div>
+          <button className="jev-btn" onClick={resetFilters}>
+            清除筛选
+          </button>
+        </div>
+      ) : (
+        <div className="jev-table">
+          <div className="jev-thead" aria-hidden="true">
+            <span>时间</span>
+            <span className="jev-col-tag">环节</span>
+            <span>工具</span>
+            <span>动作</span>
+            <span className="jev-col-lat">延迟</span>
+            <span className="jev-col-mode">模式</span>
+            <span className="jev-col-detail">判断摘要</span>
+            <span />
+          </div>
+          {rows.map((entry, index) => {
+            const key = entryKey(entry, index)
+            return (
+              <LogRow
+                key={key}
+                entry={entry}
+                open={expanded === key}
+                onToggle={() => {
+                  setExpanded(expanded === key ? null : key)
+                }}
+              />
             )
-            : (
-              <div className="jev-table">
-                <div className="jev-thead">
-                  <span>时间</span>
-                  <span className="jev-col-tag">环节</span>
-                  <span className="jev-col-tool">工具</span>
-                  <span>动作</span>
-                  <span className="jev-col-lat">延迟</span>
-                  <span className="jev-col-mode">模式</span>
-                  <span>详情</span>
-                </div>
-                {rows.map((entry, index) => {
-                  const key = entryKey(entry, index)
-                  return (
-                    <LogRow
-                      key={key}
-                      entry={entry}
-                      open={expanded === key}
-                      onToggle={() => { setExpanded(expanded === key ? null : key) }}
-                    />
-                  )
-                })}
-              </div>
-            )}
-        {/* 分页导航吸在视口底部：翻页无需滚动找按钮（不用负边距铺满，避免横向溢出）。 */}
-        <div className="jev-toolbar" style={{
-          justifyContent: 'center',
-          position: 'sticky',
-          bottom: 0,
-          zIndex: 2,
-          background: 'var(--dsw-alias-bg-base,#fff)',
-          borderTop: '1px solid var(--dsw-alias-border-l1)',
-          borderRadius: '0 0 12px 12px',
-          paddingTop: 8,
-          paddingBottom: 8,
-        }}>
-          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(1) }}>首页</button>
-          <button className="jev-btn" disabled={safePage <= 1} onClick={() => { gotoPage(safePage - 1) }}>← 上一页</button>
-          <span className="jev-note" style={{ whiteSpace: 'nowrap' }}>
-            {`第 ${String(safePage)} / ${String(totalPages)} 页 · 本页 ${fmtNum(rows.length)} 条（共 ${fmtNum(filteredLog.length)} 条）`}
-          </span>
-          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(safePage + 1) }}>下一页 →</button>
-          <button className="jev-btn" disabled={safePage >= totalPages} onClick={() => { gotoPage(totalPages) }}>末页</button>
-          <span className="jev-note" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            跳至
+          })}
+        </div>
+      )}
+      <div className="jev-pagination">
+        <span className="jev-note">
+          {filteredLog.length === 0
+            ? '0 条记录'
+            : `${(safePage - 1) * LOG_PAGE_SIZE + 1}–${Math.min(safePage * LOG_PAGE_SIZE, filteredLog.length)} / ${fmtNum(filteredLog.length)} 条`}
+        </span>
+        <div className="jev-pagination-nav">
+          <button
+            className="jev-btn"
+            disabled={safePage <= 1}
+            onClick={() => {
+              gotoPage(1)
+            }}
+            aria-label="第一页"
+          >
+            «
+          </button>
+          <button
+            className="jev-btn"
+            disabled={safePage <= 1}
+            onClick={() => {
+              gotoPage(safePage - 1)
+            }}
+            aria-label="上一页"
+          >
+            ‹
+          </button>
+          <label className="jev-note" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
             <input
-              className="jev-search"
-              style={{ width: 64, flex: 'none', textAlign: 'center' }}
+              className="jev-input"
+              style={{ width: 48, textAlign: 'center', padding: 4 }}
+              aria-label="跳转页码，按 Enter 确认"
               type="number"
               min={1}
               max={totalPages}
               value={pageJump}
               placeholder={String(safePage)}
-              onChange={event => { setPageJump(event.target.value) }}
-              onKeyDown={event => {
-                if (event.key !== 'Enter') return
-                const target = Number.parseInt(pageJump, 10)
-                if (Number.isFinite(target)) gotoPage(target)
+              onChange={(event) => {
+                setPageJump(event.target.value)
               }}
-            />
-            页
-          </span>
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  const target = Number.parseInt(pageJump, 10)
+                  if (Number.isFinite(target)) gotoPage(target)
+                }
+              }}
+            />{' '}
+            / {totalPages}
+          </label>
+          <button
+            className="jev-btn"
+            disabled={safePage >= totalPages}
+            onClick={() => {
+              gotoPage(safePage + 1)
+            }}
+            aria-label="下一页"
+          >
+            ›
+          </button>
+          <button
+            className="jev-btn"
+            disabled={safePage >= totalPages}
+            onClick={() => {
+              gotoPage(totalPages)
+            }}
+            aria-label="最后一页"
+          >
+            »
+          </button>
         </div>
-        <p className="jev-note">
-          {`已载入最近 ${fmtNum(log.length)} 条（面板上限 500）；点一行展开完整字段，更早记录用 /jev-log 500 --json。`}
-        </p>
-      </Fragment>
-    )
-  }
-
-  const renderCalibration = (): React.JSX.Element => {
-    return (
-      <div className="jev-grid">
-        <section className="jev-card" style={{ gridColumn: '1/-1' }}>
-          <header className="jev-card-head">
-            <div>
-              <div className="jev-card-title">阈值校准建议</div>
-              <div className="jev-card-sub">读影子遥测的决策分布与一致率，给阈值调整方向；不自动应用</div>
-            </div>
-            <button
-              className="jev-btn jev-btn--primary"
-              style={{ marginLeft: 'auto' }}
-              disabled={calibBusy}
-              onClick={() => { void runCalibration() }}
-            >{calibBusy ? '分析中…' : '生成建议'}</button>
-          </header>
-          {calib === null
-            ? (
-              <div className="jev-empty">
-                <b>还没有生成报告</b>
-                <div>先生成一次，看看当前阈值是否值得调整。</div>
-              </div>
-            )
-            : (
-              <Fragment>
-                <div className="jev-chips">
-                  <Badge tone="brand">{`窗口 ${fmtNum(calib.windowSize)} 条`}</Badge>
-                  <Badge tone="muted">{`守门人 ${fmtNum(calib.counts.guard)}`}</Badge>
-                  <Badge tone="muted">{`预批准 ${fmtNum(calib.counts.preapprove)}`}</Badge>
-                  <Badge tone="muted">{`一致率 ${fmtNum(calib.counts.approvalLoop)}`}</Badge>
-                  <Badge tone="muted">{`观察 ${fmtNum(calib.modeSplit.shadow)} · 执行 ${fmtNum(calib.modeSplit.enforce)}`}</Badge>
-                  {calib.history === undefined ? null : (
-                    <Badge tone={calib.history.adopted > 0 ? 'ok' : 'muted'}>
-                      {`上次 ${calib.history.previousTs.slice(5, 10)}：采纳 ${String(calib.history.adopted)} / 未采纳 ${String(calib.history.ignored)}`
-                        + (calib.history.manual !== undefined && calib.history.manual > 0 ? ` / 手调 ${String(calib.history.manual)}` : '')}
-                    </Badge>
-                  )}
-                </div>
-                {calib.allowlistSuggestions !== undefined && calib.allowlistSuggestions.length > 0 && (
-                  <div>
-                    <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>
-                      预批准候选（影子数据：全部低风险、高置信、低不可逆、无注入嫌疑）
-                    </div>
-                    {calib.allowlistSuggestions.map(s => (
-                      <div key={s.tool} className="jev-advice">
-                        <div className="jev-advice-head">
-                          <span className="jev-param" style={{ color: TONE.ok }}>{s.tool}</span>
-                          <Badge tone="muted">{`样本 ${String(s.samples)}`}</Badge>
-                          <Badge tone="muted">{`平均置信 ${s.avgConfidence.toFixed(2)}`}</Badge>
-                          <Badge tone="muted">{`平均不可逆 ${s.avgIrreversibility.toFixed(2)}`}</Badge>
-                          <button
-                            className="jev-btn jev-btn--primary"
-                            style={{ marginLeft: 'auto' }}
-                            disabled={busy !== ''}
-                            title="加入预批准名单并立即生效；自动批仍受双 noul 证据门约束"
-                            onClick={() => { void applyAllowlist(s.tool, true) }}
-                          >加入名单</button>
-                        </div>
-                      </div>
-                    ))}
-                    <p className="jev-note">候选只统计「全部调用均为低风险」的工具；加入后每次自动批仍单独过证据门，一致率遥测持续监督。</p>
-                  </div>
-                )}
-                {calib.advice.length === 0
-                  ? (
-                    <div className="jev-empty">
-                      <b>当前无需调整阈值</b>
-                      <div>遥测分布与现配置一致（或上次建议已全部应用）。有新的调整建议时，每条建议卡右上角会出现「应用」按钮。</div>
-                    </div>
-                  )
-                  : calib.advice.map(advice => (
-                    <div key={advice.param} className="jev-advice">
-                      <div className="jev-advice-head">
-                        <span className="jev-param" style={{ color: TONE[paramTone(advice.param)] }}>{advice.param}</span>
-                        <span className="jev-delta">
-                          {advice.current.toFixed(2)}<i> → </i>{advice.suggested.toFixed(2)}
-                          {` ${advice.suggested > advice.current ? '↑' : '↓'}`}
-                        </span>
-                        <Badge tone="muted">{`样本 ${fmtNum(advice.samples)}`}</Badge>
-                        <button
-                          className="jev-btn jev-btn--primary"
-                          style={{ marginLeft: 'auto' }}
-                          disabled={calibBusy}
-                          title="写入该阈值并立即生效（不重启）；持久化取决于设置服务"
-                          onClick={() => { void applyAdvice(advice.param, advice.suggested) }}
-                        >应用</button>
-                      </div>
-                      <p className="jev-note">{advice.basis}</p>
-                      {(advice.note ?? '').length === 0 ? null : <p className="jev-note">{advice.note}</p>}
-                    </div>
-                  ))}
-                {calib.insufficient.length === 0 ? null : (
-                  <div>
-                    <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>样本不足</div>
-                    <p className="jev-note">{calib.insufficient.map(note => note.reason).join('；')}</p>
-                  </div>
-                )}
-                {calib.observations.length === 0 ? null : (
-                  <div>
-                    <div className="jev-card-title" style={{ fontSize: 12, marginBottom: 3 }}>观察项</div>
-                    <p className="jev-note">{calib.observations.map(note => note.reason).join('；')}</p>
-                  </div>
-                )}
-                <p className="jev-note">「应用」写入阈值并立即生效（无需重启）；持久化取决于设置服务是否落盘。</p>
-              </Fragment>
-            )}
-        </section>
       </div>
-    )
-  }
+      <p className="jev-note">
+        面板最多展示最近 500 条；更早记录可用 /jev-log 查看。导出只包含当前筛选结果。
+      </p>
+    </div>
+  )
+
+  const renderCalibration = (): React.JSX.Element => (
+    <div className="jev-page">
+      <div className="jev-section-head">
+        <div>
+          <h3>阈值校准</h3>
+          <p>用观察数据检验阈值，逐项决定是否采纳。</p>
+        </div>
+        <button
+          className="jev-btn jev-btn--primary"
+          disabled={calibBusy || busy !== ''}
+          onClick={() => {
+            void runCalibration(reportModel)
+          }}
+        >
+          <Icon name="sliders" size={14} />
+          {calibBusy ? '分析中…' : calib === null ? '生成校准报告' : '重新分析'}
+        </button>
+      </div>
+      <div className="jev-calibration-layout">
+        <div className="jev-advice-list">
+          {calib === null ? (
+            <div className="jev-empty">
+              <Icon name="sliders" size={32} />
+              <b>让数据给出调整依据</b>
+              <div>
+                分析现有遥测，查看阈值建议、样本量和可能的影响。
+                <br />
+                报告不会自动修改配置。
+              </div>
+            </div>
+          ) : (
+            <Fragment>
+              <section className="jev-card">
+                <header className="jev-card-head">
+                  <div>
+                    <div className="jev-card-title">本次分析</div>
+                    <div className="jev-card-sub">{calib.scope === undefined
+                      ? `最近 ${fmtNum(calib.windowSize)} 条遥测记录`
+                      : `纳入 ${fmtNum(calib.windowSize)} / ${fmtNum(calib.scope.scanned)} 条决策与一致率记录`}</div>
+                  </div>
+                  <Badge tone="business">{calib.advice.length} 项阈值建议</Badge>
+                </header>
+                {calib.scope !== undefined && <div className="jev-field">
+                  <label className="jev-field-label" htmlFor="jev-calibration-model">回放模型版本</label>
+                  <select id="jev-calibration-model" className="jev-select" value={reportModel}
+                    disabled={calibBusy || busy !== ''} onChange={(event) => { void runCalibration(event.target.value) }}>
+                    <option value="">当前模型</option>
+                    {calib.scope.models.map(item => <option key={item.model} value={item.model}>{item.model}（{fmtNum(item.samples)} 条）</option>)}
+                  </select>
+                  <Fact label="本次使用的版本">{calib.scope.model ?? '待连接测试确认'}</Fact>
+                  {!canApplyCalibration && calib.scope.model !== null &&
+                    <p className="jev-note">这份报告对应历史版本。选择当前模型可生成可用建议。</p>}
+                </div>}
+                <div className="jev-chips">
+                  <Badge tone="brand">守门人 {fmtNum(calib.counts.guard)}</Badge>
+                  <Badge tone="ok">预批准 {fmtNum(calib.counts.preapprove)}</Badge>
+                  <Badge tone="muted">一致率 {fmtNum(calib.counts.approvalLoop)}</Badge>
+                </div>
+                <Fact label="模式构成">
+                  观察 {fmtNum(calib.modeSplit.shadow)} / 执行 {fmtNum(calib.modeSplit.enforce)}
+                </Fact>
+                {calib.history !== undefined && (
+                  <p className="jev-note">
+                    与 {calib.history.previousTs.slice(0, 10)} 的报告相比：采纳 {calib.history.adopted}{' '}
+                    项，未采纳 {calib.history.ignored} 项
+                    {calib.history.manual ? `，手动修改 ${calib.history.manual} 项` : ''}。
+                  </p>
+                )}
+              </section>
+              {calib.advice.length === 0 ? (
+                <div className="jev-empty">
+                  <Icon name="check" size={28} />
+                  <b>{calib.windowSize === 0 ? '没有可用于回放的样本' : calib.insufficient.length > 0 ? '暂不建议调整' : '当前无需调整阈值'}</b>
+                  <div>
+                    {calib.windowSize === 0 ? '检查连接，或选择已有记录的模型版本。' : calib.insufficient.length > 0
+                      ? '部分环节样本不足，继续观察后再分析。'
+                      : '当前样本没有产生新的阈值建议。'}
+                  </div>
+                </div>
+              ) : (
+                calib.advice.map((advice) => (
+                  <article key={advice.param} className="jev-advice">
+                    <div className="jev-advice-head">
+                      <Badge tone={paramTone(advice.param)}>
+                        {advice.param.startsWith('guard') ? '守门人' : '预批准'}
+                      </Badge>
+                      <span className="jev-param">{advice.param}</span>
+                      <Badge tone="muted">{fmtNum(advice.samples)} 条样本</Badge>
+                    </div>
+                    <div className="jev-advice-head">
+                      <span className="jev-delta">
+                        <del>{advice.current.toFixed(2)}</del>
+                        <i>→</i>
+                        {advice.suggested.toFixed(2)}
+                      </span>
+                      <button
+                        className="jev-btn"
+                        style={{ marginLeft: 'auto' }}
+                        disabled={calibBusy || busy !== '' || !canApplyCalibration}
+                        onClick={() => {
+                          void applyAdvice(advice.param, advice.current, advice.suggested)
+                        }}
+                      >
+                        应用此建议
+                      </button>
+                    </div>
+                    <p className="jev-note">{advice.basis}</p>
+                    {advice.note && <p className="jev-note">{advice.note}</p>}
+                  </article>
+                ))
+              )}
+              {(calib.allowlistSuggestions?.length ?? 0) > 0 && (
+                <section className="jev-card">
+                  <div className="jev-card-title">预批准候选工具</div>
+                  <p className="jev-note">
+                    观察记录均为低风险。加入名单后，每次调用仍需通过授权与参数证据检查。
+                  </p>
+                  {calib.allowlistSuggestions!.map((item) => {
+                    const added = status?.preapproveAllowlist?.includes(item.tool) === true
+                    return (
+                      <div key={item.tool} className="jev-advice">
+                        <div className="jev-advice-head">
+                          <span className="jev-param">{item.tool}</span>
+                          <button
+                            className="jev-btn"
+                            style={{ marginLeft: 'auto' }}
+                            disabled={busy !== '' || calibBusy || added || !canApplyCalibration}
+                            onClick={() => {
+                              void applyAllowlist(item.tool, true)
+                            }}
+                          >
+                            {added ? '已在名单' : '加入名单'}
+                          </button>
+                        </div>
+                        <p className="jev-note">
+                          {item.samples} 条样本，平均置信 {item.avgConfidence.toFixed(2)}，平均不可逆{' '}
+                          {item.avgIrreversibility.toFixed(2)}，最高注入嫌疑 {item.maxInjection.toFixed(2)}
+                        </p>
+                      </div>
+                    )
+                  })}
+                </section>
+              )}
+              {calib.insufficient.length > 0 && (
+                <section className="jev-card">
+                  <div className="jev-card-title">样本仍需积累</div>
+                  {calib.insufficient.map((item) => (
+                    <p key={item.param} className="jev-note">
+                      {item.reason}
+                    </p>
+                  ))}
+                </section>
+              )}
+              {calib.observations.length > 0 && (
+                <section className="jev-card">
+                  <div className="jev-card-title">需要留意</div>
+                  {calib.observations.map((item, index) => (
+                    <p key={`${item.param}-${index}`} className="jev-note">
+                      {item.reason}
+                    </p>
+                  ))}
+                </section>
+              )}
+            </Fragment>
+          )}
+        </div>
+        <aside className="jev-card jev-calibration-intro">
+          <Icon name="shield" size={25} />
+          <div className="jev-card-title">小步调整，持续验证</div>
+          <p className="jev-note">建议由现有决策重放得出。先看样本量与影响，再应用单项调整。</p>
+          <Fact label="当前模型">{status?.activeModel ?? status?.model ?? '—'}</Fact>
+          <Fact label="当前观察样本">{readiness === null ? '—' : fmtNum(readiness.shadowSamples)}</Fact>
+          <Fact label="观察期降级率">
+            {readiness === null ? '—' : `${(readiness.degradedRate * 100).toFixed(1)}%`}
+          </Fact>
+          {readiness !== null && <p className="jev-note">{readiness.reason}</p>}
+          <p className="jev-note">应用后，下一个调用即使用新阈值。建议采纳情况会在下次报告中展示。</p>
+        </aside>
+      </div>
+    </div>
+  )
 
   const renderSettings = (): React.JSX.Element => {
     return (
-      <div className="jev-grid">
-        <section className="jev-card">
-          <header className="jev-card-head">
-            <div>
-              <div className="jev-card-title">连接</div>
-              <div className="jev-card-sub">Provider 决定请求发往哪里；切换立即生效</div>
-            </div>
-          </header>
-          <div className="jev-provider">
-            {PROVIDERS.map(item => (
-              <button
-                key={item.id}
-                type="button"
-                data-on={provider === item.id ? '1' : '0'}
-                disabled={busy !== ''}
-                onClick={() => {
-                  if (provider === item.id) return
-                  void applyPatch('provider', { provider: item.id }, { provider: item.id })
-                }}
-              >
-                <b>{item.label}</b>
-                <span>{item.hint}</span>
-              </button>
-            ))}
+      <div className="jev-page">
+        <div className="jev-section-head">
+          <div>
+            <h3>连接与运行设置</h3>
+            <p>配置服务、管理审批范围，修改后即时生效。</p>
           </div>
-          {provider === 'custom'
-            ? (
-              <div className="jev-field">
-                <label className="jev-field-label">Base URL</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input
-                    className="jev-input"
-                    placeholder="https://your-proxy.example.com/v1/systemone"
-                    value={endpointDraft}
-                    onChange={event => { setEndpointDraft(event.target.value) }}
-                    onKeyDown={event => {
-                      if (event.key !== 'Enter') return
-                      void saveEndpoint()
-                    }}
-                  />
-                  <button
-                    className="jev-btn"
-                    disabled={busy !== '' || endpointDraft.trim().length === 0}
-                    onClick={() => { void saveEndpoint() }}
-                  >{busy === 'endpoint' ? '…' : '保存'}</button>
-                </div>
-                <p className="jev-note">留空则沿用配置里的 endpoint。</p>
+          <span className="jev-setting-status">
+            <i className="jev-dot" style={{ color: keySource === 'none' ? TONE.warn : TONE.ok }} />
+            {keySource === 'none' ? '尚未配置 Key' : '已配置凭据'}
+          </span>
+        </div>
+        <div className="jev-grid">
+          <section className="jev-card">
+            <header className="jev-card-head">
+              <div>
+                <div className="jev-card-title">连接</div>
+                <div className="jev-card-sub">保存后使用选定的服务与模型。</div>
               </div>
-            )
-            : <p className="jev-note">端点由 Provider 预置；选「自定义」可覆盖。</p>}
-        </section>
-
-        <section className="jev-card">
-          <header className="jev-card-head">
-            <div>
-              <div className="jev-card-title">API Key</div>
-              <div className="jev-card-sub">{`来源：${KEY_SOURCE[keySource] ?? keySource}`}</div>
-            </div>
-          </header>
-          <div className="jev-field">
-            <label className="jev-field-label">
-              {keyLocked ? '当前使用的 Key（已脱敏）' : keySource === 'none' ? '粘贴你的 Jev API Key' : '覆盖已有 Key'}
-            </label>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              {keyLocked ? (
-                <Fragment>
-                  <input
-                    className="jev-input jev-mono"
-                    value={keyMask}
-                    readOnly
-                    disabled
-                    style={{ flex: '1 1 150px', opacity: .8 }}
-                  />
-                  <button
-                    className="jev-btn"
-                    disabled={busy !== ''}
-                    title="清空输入框，粘贴新 Key"
-                    onClick={() => { setKeyLocked(false); setKeyMask('') }}
-                  >更换</button>
-                </Fragment>
-              ) : (
-                <Fragment>
-                  <input
-                    className="jev-input"
-                    type={showKey ? 'text' : 'password'}
-                    placeholder={keySource === 'none' ? '至少 10 个字符' : '输入新值以覆盖'}
-                    value={keyDraft}
-                    onChange={event => { setKeyDraft(event.target.value) }}
-                    onKeyDown={event => {
-                      if (event.key !== 'Enter') return
-                      void saveKey()
-                    }}
-                  />
-                  <button
-                    className="jev-btn"
-                    disabled={keyDraft.length === 0}
-                    onClick={() => { setShowKey(!showKey) }}
-                  >{showKey ? '隐藏' : '显示'}</button>
-                  <button
-                    className="jev-btn jev-btn--primary"
-                    disabled={busy !== '' || keyDraft.trim().length < 10}
-                    onClick={() => { void saveKey() }}
-                  >{busy === 'key' ? '…' : '保存'}</button>
-                </Fragment>
-              )}
-              <button
-                className="jev-btn"
-                disabled={pingBusy || (!keyLocked && keyDraft.trim().length < 10 && keySource === 'none')}
-                title="向 Provider 发一次最小真实请求，验证 Key 与端点（约 $0.00001）"
-                onClick={() => { void runPing() }}
-              >{pingBusy ? '测试中…' : '测试连接'}</button>
-            </div>
-            {pingResult !== null && (
-              <p className="jev-note" style={{ color: pingResult.ok ? TONE.ok : TONE.err }}>
-                {pingResult.ok ? '✓ ' : '✗ '}{pingText(pingResult)}
-              </p>
-            )}
-          </div>
-          <p className="jev-note">Key 只写入本机配置，保存后以脱敏形式显示；「测试连接」会先测未保存的草稿 Key，再测已配置的。</p>
-        </section>
-
-        <section className="jev-card">
-          <header className="jev-card-head">
-            <div>
-              <div className="jev-card-title">生效中的能力</div>
-              <div className="jev-card-sub">其余开关在 cordis.yml / 设置面板调整</div>
-            </div>
-          </header>
-          <div className="jev-chips">
-            <Badge tone={status?.guardEnabled === true ? 'ok' : 'muted'}>{`守门人 ${status?.guardEnabled === true ? '开' : '关'}`}</Badge>
-            <Badge tone={status?.preapproveEnabled === true ? 'ok' : 'muted'}>{`预批准 ${status?.preapproveEnabled === true ? '开' : '关'}`}</Badge>
-            <Badge tone={status?.stagnationEnabled === true ? 'ok' : 'muted'}>{`停滞检测 ${status?.stagnationEnabled === true ? '开' : '关'}`}</Badge>
-            <Badge tone={status?.enabled === true ? 'ok' : 'muted'}>{`总开关 ${status?.enabled === true ? '开' : '关'}`}</Badge>
-          </div>
-          <div className="jev-field">
-            <label className="jev-field-label">模式</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              <Segmented
-                label="决策模式"
-                value={mode}
-                disabled={busy !== ''}
-                options={[
-                  { value: 'shadow', label: '观察', title: MODE_HINT.shadow },
-                  { value: 'enforce', label: '执行', title: MODE_HINT.enforce },
-                ]}
-                onChange={next => { void applyPatch('mode', { mode: next }, { mode: next as JevStatus['mode'] }) }}
-              />
-              <span className="jev-note">{MODE_HINT[mode]}</span>
-            </div>
-          </div>
-          <p className="jev-note">切到执行前，建议先观察一段时间，确认拒绝与转人工的判断符合预期。</p>
-        </section>
-
-        <section className="jev-card">
-          <header className="jev-card-head">
-            <div>
-              <div className="jev-card-title">预批准名单</div>
-              <div className="jev-card-sub">
-                {`名单内的工具，审批请求会经 Jev 双重判断（授权范围 + 可逆）后自动放行；当前 ${String((status?.preapproveAllowlist ?? []).length)} 个`}
-              </div>
-            </div>
-          </header>
-          {(status?.preapproveAllowlist ?? []).length === 0 ? (
-            <p className="jev-note">名单为空——预批准不会自动批任何工具（这就是「省点击」还没发生的原因）。去「阈值校准」tab 生成建议，影子数据会推荐可信工具。</p>
-          ) : (
-            <div className="jev-chips">
-              {(status?.preapproveAllowlist ?? []).map(tool => (
+            </header>
+            <div className="jev-provider">
+              {PROVIDERS.map((item) => (
                 <button
-                  key={tool}
-                  className="jev-chip"
-                  data-on="1"
-                  disabled={busy !== ''}
-                  title="点击移出预批准名单（立即生效）"
-                  onClick={() => { void applyAllowlist(tool, false) }}
-                >{tool} ✕</button>
+                  key={item.id}
+                  type="button"
+                  data-on={selectedProvider === item.id ? '1' : '0'}
+                  aria-pressed={selectedProvider === item.id}
+                  disabled={busy !== '' || pingBusy}
+                  onClick={() => {
+                    clearConnectionDraft()
+                    setProviderDraft(item.id === provider ? null : item.id)
+                  }}
+                >
+                  <b>{item.label}</b>
+                  <span>{item.hint}</span>
+                </button>
               ))}
             </div>
-          )}
-          <p className="jev-note">自动批仍受证据门约束：Jev 会核对参数证据与授权范围，任何怀疑都转人工。</p>
-        </section>
+            <Fact label="请求模型">{status?.model || '未配置'}</Fact>
+            {status?.activeModel != null && status.activeModel !== status.model &&
+              <Fact label="实际响应模型">{status.activeModel}</Fact>}
+            {status?.endpointOrigin && <Fact label="当前地址">{status.endpointOrigin}</Fact>}
+            {status?.connectionError && <p className="jev-note" style={{ color: TONE.err }}>{status.connectionError}</p>}
+            <form className="jev-field" onSubmit={(event) => { event.preventDefault(); void saveConnection() }}>
+              {choosingCustom && <Fragment>
+                <div className="jev-field">
+                  <label className="jev-field-label" htmlFor="jev-endpoint">完整端点</label>
+                  <input className="jev-input" id="jev-endpoint" type="url"
+                    placeholder="https://example.com/v1/systemone" value={endpointDraft}
+                    onChange={(event) => { setEndpointDraft(event.target.value) }} />
+                </div>
+                <div className="jev-field">
+                  <label className="jev-field-label" htmlFor="jev-model">模型 ID</label>
+                  <input className="jev-input" id="jev-model" placeholder={provider === 'custom' ? status?.model : '例如 jev-1.14.0'}
+                    value={modelDraft} onChange={(event) => { setModelDraft(event.target.value) }} />
+                </div>
+                <div className="jev-field">
+                  <label className="jev-field-label" htmlFor="jev-credential">凭据引用</label>
+                  <input className="jev-input" id="jev-credential" placeholder={changesTarget ? '例如 JEV_CUSTOM_API_KEY' : status?.keyReference}
+                    value={credentialDraft} onChange={(event) => { setCredentialDraft(event.target.value) }} />
+                  <p className="jev-note">填写环境变量名。在新地址上使用对应的凭据。</p>
+                </div>
+              </Fragment>}
+              {connectionDirty && <div className="jev-field">
+                {changesTarget && keySource === 'config' && <p className="jev-note">保存新连接会移除当前保存的 Key，并改用新连接的凭据引用。</p>}
+                <div className="jev-toolbar">
+                  <button type="submit" className="jev-btn jev-btn--primary" disabled={busy !== '' || pingBusy || (choosingCustom && !customReady)}>{busy === 'connection' ? '保存中…' : '保存连接'}</button>
+                  <button type="button" className="jev-btn jev-btn--quiet" disabled={busy !== ''} onClick={clearConnectionDraft}>取消</button>
+                </div>
+              </div>}
+            </form>
+          </section>
 
-        <section className="jev-card">
-          <header className="jev-card-head">
-            <div>
-              <div className="jev-card-title">刷新</div>
-              <div className="jev-card-sub">
-                {updatedAt > 0 ? `上次更新 ${clockOf(new Date(updatedAt).toISOString())}` : '尚未刷新'}
+          <section className="jev-card">
+            <header className="jev-card-head">
+              <div>
+                <div className="jev-card-title">API Key</div>
+                <div className="jev-card-sub">来源：{KEY_SOURCE[keySource] ?? keySource}{keySource !== 'config' && status?.keyReference ? `（${status.keyReference}）` : ''}</div>
+              </div>
+            </header>
+            {status?.keyError && <p className="jev-note" style={{ color: TONE.warn }}>{status.keyError}</p>}
+            {connectionDirty && <p className="jev-note">先保存连接，再输入或测试对应的 API Key。</p>}
+            <div className="jev-field">
+              <label className="jev-field-label" htmlFor="jev-api-key">
+                {keyLocked
+                  ? '当前使用的 Key（已脱敏）'
+                  : keySource === 'none'
+                    ? '粘贴你的 Jev API Key'
+                    : '覆盖已有 Key'}
+              </label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                {keyLocked ? (
+                  <Fragment>
+                    <input
+                      id="jev-api-key"
+                      className="jev-input jev-mono"
+                      value={keyMask}
+                      readOnly
+                      disabled
+                      style={{ flex: '1 1 150px', opacity: 0.8 }}
+                    />
+                    <button
+                      className="jev-btn"
+                      disabled={busy !== '' || connectionDirty}
+                      title="清空输入框，粘贴新 Key"
+                      onClick={() => {
+                        setKeyLocked(false)
+                        setKeyMask('')
+                      }}
+                    >
+                      更换
+                    </button>
+                  </Fragment>
+                ) : (
+                  <Fragment>
+                    <input
+                      className="jev-input"
+                      id="jev-api-key"
+                      autoComplete="off"
+                      spellCheck={false}
+                      type={showKey ? 'text' : 'password'}
+                      placeholder={keySource === 'none' ? '至少 10 个字符' : '输入新值以覆盖'}
+                      value={keyDraft}
+                      disabled={connectionDirty || !!status?.connectionError || busy !== ''}
+                      onChange={(event) => {
+                        setKeyDraft(event.target.value)
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' || busy !== '' || pingBusy) return
+                        void saveKey()
+                      }}
+                    />
+                    <button
+                      className="jev-btn"
+                      disabled={keyDraft.length === 0 || connectionDirty}
+                      onClick={() => {
+                        setShowKey(!showKey)
+                      }}
+                    >
+                      {showKey ? '隐藏' : '显示'}
+                    </button>
+                    <button
+                      className="jev-btn jev-btn--primary"
+                      disabled={busy !== '' || pingBusy || connectionDirty || !!status?.connectionError || keyDraft.trim().length < 10}
+                      onClick={() => {
+                        void saveKey()
+                      }}
+                    >
+                      {busy === 'key' ? '…' : '保存'}
+                    </button>
+                  </Fragment>
+                )}
+                <button
+                  className="jev-btn"
+                  disabled={
+                    busy !== '' ||
+                    pingBusy ||
+                    connectionDirty ||
+                    !!status?.connectionError ||
+                    (keyDraft.trim().length > 0 ? keyDraft.trim().length < 10 : keySource === 'none')
+                  }
+                  title="向 Provider 发一次最小真实请求，验证 Key 与端点（约 $0.00001）"
+                  onClick={() => {
+                    void runPing()
+                  }}
+                >
+                  {pingBusy ? '测试中…' : '测试连接'}
+                </button>
+                {keySource === 'config' && (
+                  <button
+                    className="jev-btn jev-btn--quiet"
+                    disabled={busy !== '' || pingBusy || connectionDirty || !!status?.connectionError}
+                    title="清除已保存的 Key，改用当前凭据引用"
+                    onClick={() => { void useCredentialReference() }}
+                  >
+                    改用凭据引用
+                  </button>
+                )}
+              </div>
+              {pingResult !== null && (
+                <p className="jev-note" role="status" style={{ color: pingResult.error === 'rate-limited' ? TONE.warn : pingResult.ok ? TONE.ok : TONE.err }}>
+                  {pingResult.error === 'rate-limited' ? '' : pingResult.ok ? '✓ ' : '✗ '}
+                  {pingText(pingResult)}
+                </p>
+              )}
+            </div>
+            <p className="jev-note">测试连接会用当前输入的 Key。输入框为空时使用已配置的凭据。</p>
+          </section>
+
+          <section className="jev-card">
+            <header className="jev-card-head">
+              <div>
+                <div className="jev-card-title">生效中的能力</div>
+                <div className="jev-card-sub">当前各能力的启用状态</div>
+              </div>
+            </header>
+            <div className="jev-chips">
+              <Badge
+                tone={status?.guardEnabled === true ? 'ok' : 'muted'}
+              >{`守门人 ${status?.guardEnabled === true ? '开' : '关'}`}</Badge>
+              <Badge
+                tone={status?.preapproveEnabled === true ? 'ok' : 'muted'}
+              >{`预批准 ${status?.preapproveEnabled === true ? '开' : '关'}`}</Badge>
+              <Badge
+                tone={status?.stagnationEnabled === true ? 'ok' : 'muted'}
+              >{`停滞检测 ${status?.stagnationEnabled === true ? '开' : '关'}`}</Badge>
+              <Badge
+                tone={status?.enabled === true ? 'ok' : 'muted'}
+              >{`总开关 ${status?.enabled === true ? '开' : '关'}`}</Badge>
+            </div>
+            <div className="jev-field">
+              <label className="jev-field-label">模式</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <Segmented
+                  label="决策模式"
+                  value={mode}
+                  disabled={busy !== ''}
+                  options={[
+                    { value: 'shadow', label: '观察', title: MODE_HINT.shadow },
+                    { value: 'enforce', label: '执行', title: MODE_HINT.enforce },
+                  ]}
+                  onChange={(next) => {
+                    void applyPatch('mode', { mode: next }, { mode: next as JevStatus['mode'] })
+                  }}
+                />
+                <span className="jev-note">{MODE_HINT[mode]}</span>
               </div>
             </div>
-          </header>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <label className="jev-note" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={event => { setAutoRefresh(event.target.checked) }}
-              />
-              {`每 ${String(REFRESH_MS / 1000)} 秒自动刷新`}
-            </label>
-            <button
-              className="jev-btn"
-              disabled={loading}
-              onClick={() => { void load(false) }}
-            >{loading ? '刷新中…' : '立即刷新'}</button>
-          </div>
-          <p className="jev-note">页面不可见时自动暂停，不产生后台请求。</p>
-        </section>
+            <p className="jev-note">切到执行前，建议先观察一段时间，确认拒绝与转人工的判断符合预期。</p>
+          </section>
+
+          <section className="jev-card">
+            <header className="jev-card-head">
+              <div>
+                <div className="jev-card-title">预批准名单</div>
+                <div className="jev-card-sub">
+                  {`名单内的工具，审批请求会经 Jev 双重判断（授权范围 + 可逆）后自动放行；当前 ${String((status?.preapproveAllowlist ?? []).length)} 个`}
+                </div>
+              </div>
+            </header>
+            {(status?.preapproveAllowlist ?? []).length === 0 ? (
+              <p className="jev-note">
+                名单为空，当前不会自动批准工具。可在阈值校准中查看基于观察数据的候选工具。
+              </p>
+            ) : (
+              <div className="jev-chips">
+                {(status?.preapproveAllowlist ?? []).map((tool) => (
+                  <button
+                    key={tool}
+                    className="jev-chip"
+                    data-on="1"
+                    disabled={busy !== ''}
+                    title="点击移出预批准名单（立即生效）"
+                    onClick={() => {
+                      void applyAllowlist(tool, false)
+                    }}
+                  >
+                    {tool} ✕
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="jev-note">自动批仍受证据门约束：Jev 会核对参数证据与授权范围，任何怀疑都转人工。</p>
+          </section>
+
+          <section className="jev-card">
+            <header className="jev-card-head">
+              <div>
+                <div className="jev-card-title">刷新</div>
+                <div className="jev-card-sub">
+                  {updatedAt > 0 ? `上次更新 ${clockOf(new Date(updatedAt).toISOString())}` : '尚未刷新'}
+                </div>
+              </div>
+            </header>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <label
+                className="jev-note"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(event) => {
+                    setAutoRefresh(event.target.checked)
+                  }}
+                />
+                {`每 ${String(REFRESH_MS / 1000)} 秒自动刷新`}
+              </label>
+              <button
+                className="jev-btn"
+                disabled={loading}
+                onClick={() => {
+                  void load(false)
+                }}
+              >
+                {loading ? '刷新中…' : '立即刷新'}
+              </button>
+            </div>
+            <p className="jev-note">页面不可见时自动暂停，不产生后台请求。</p>
+          </section>
+        </div>
       </div>
     )
   }
@@ -1670,120 +2221,175 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
   return (
     <div className="jev-root">
       <header className="jev-head">
-        <div className="jev-logo">⚡</div>
+        <div className="jev-logo">
+          <Icon name="bolt" size={23} />
+        </div>
         <div className="jev-headtext">
           <div className="jev-title-row">
             <h2 className="jev-title">Jev 决策</h2>
-            {status === null ? null : (
+            {status !== null && (
               <span className="jev-status" data-on={status.enabled ? '1' : '0'}>
                 <i className="jev-dot" />
-                {status.enabled
-                  ? status.mode === 'shadow' ? '运行中 · 观察模式' : '运行中 · 执行模式'
-                  : '已停用'}
+                {status.enabled ? '运行中' : '已停用'}
               </span>
             )}
           </div>
-          <div className="jev-sub">
-            {updatedAt > 0
-              ? `系统一风险判断 · 更新于 ${clockOf(new Date(updatedAt).toISOString())}`
-              : '毫秒级系统一风险判断'}
-          </div>
+          <div className="jev-sub">工具风险判断与审批记录</div>
         </div>
         <div className="jev-head-actions">
           <button
             className="jev-btn"
             disabled={loading}
-            title="重新拉取状态与最近决策"
-            onClick={() => { void load(false) }}
-          >{loading ? '刷新中…' : '刷新'}</button>
-          {status === null ? null : (
+            title="重新读取状态与最近决策"
+            onClick={() => {
+              void load(false)
+            }}
+          >
+            <Icon name="refresh" size={14} />
+            {loading ? '刷新中…' : '刷新'}
+          </button>
+          {status !== null && (
             <button
-              className={status.enabled ? 'jev-btn' : 'jev-btn jev-btn--primary'}
+              className="jev-btn jev-btn--quiet"
               disabled={busy !== ''}
-              title={status.enabled ? '停用后恢复 dsh 原生行为' : '启用 Jev 决策'}
+              title={status.enabled ? '停用后恢复原生流程' : '启用 Jev 决策'}
               onClick={() => {
                 void applyPatch('enabled', { enabled: !status.enabled }, { enabled: !status.enabled })
               }}
-            >{busy === 'enabled' ? '…' : status.enabled ? '停用' : '启用'}</button>
+            >
+              <Icon name="power" size={14} />
+              {busy === 'enabled' ? '保存中…' : status.enabled ? '停用' : '启用'}
+            </button>
           )}
         </div>
       </header>
-
-      {loadErr === '' || status === null ? null : <div className="jev-toast" data-tone="err">{loadErr}</div>}
-      {toast === null ? null : <div className="jev-toast" data-tone={toast.tone}>{toast.text}</div>}
-
-      {status === null ? null : (
-        <section className="jev-hero">
-          <div className="jev-kpis">
-            <Kpi label="决策总数" value={aggregate.calls} hint="统计窗口内的全部判断" />
-            <Kpi label="自动批准" value={aggregate.auto} tone="ok" hint="省掉的人工确认次数" />
-            <Kpi label="转人工" value={aggregate.ask} tone="warn" hint="风险不确定，交回人工" />
-            <Kpi label="拒绝" value={aggregate.deny} tone="err" hint="高置信风险，直接否决" />
-            <Kpi label="降级" value={aggregate.degraded} tone={aggregate.degraded > 0 ? 'warn' : undefined} hint="决策失败，回落原生行为" />
-          </div>
-          <div className="jev-hero-side">
-            <div className="jev-fact">
-              <span>模式</span>
-              <Segmented
-                label="决策模式"
-                value={mode}
-                disabled={busy !== ''}
-                options={[
-                  { value: 'shadow', label: '观察', title: MODE_HINT.shadow },
-                  { value: 'enforce', label: '执行', title: MODE_HINT.enforce },
-                ]}
-                onChange={next => { void applyPatch('mode', { mode: next }, { mode: next as JevStatus['mode'] }) }}
-              />
-            </div>
-            <Fact label="Provider">{provider}</Fact>
-            <Fact label="模型">{status.model}</Fact>
-            <Fact label="API Key">{KEY_SOURCE[keySource] ?? keySource}</Fact>
-            <Fact label="今日成本">
-              {status.costTodayUsd === undefined
-                ? '—'
-                : (status.dailyCostLimitUsd ?? 0) > 0
-                  ? `$${status.costTodayUsd.toFixed(6)} / 限 $${(status.dailyCostLimitUsd ?? 0).toFixed(2)}${status.costTodayUsd >= (status.dailyCostLimitUsd ?? Infinity) ? '（已超限，降级中）' : ''}`
-                  : `$${status.costTodayUsd.toFixed(6)}`}
-            </Fact>
-          </div>
-        </section>
+      {status !== null && (
+        <div className="jev-runbar">
+          <span>
+            <Icon name="activity" size={14} />
+            <b>{PROVIDERS.find((item) => item.id === provider)?.label ?? provider}</b>
+          </span>
+          <span className="jev-run-model">{status.model}</span>
+          <span
+            title={
+              (status.dailyCostLimitUsd ?? 0) > 0
+                ? `今日限额 $${status.dailyCostLimitUsd!.toFixed(2)}`
+                : '未设置每日限额'
+            }
+          >
+            <small>今日成本</small>
+            <b>{status.costTodayUsd === undefined ? '—' : fmtUsd(status.costTodayUsd)}</b>
+          </span>
+          <Segmented
+            label="决策模式"
+            value={mode}
+            disabled={busy !== ''}
+            options={[
+              { value: 'shadow', label: '观察模式', title: MODE_HINT.shadow },
+              { value: 'enforce', label: '执行模式', title: MODE_HINT.enforce },
+            ]}
+            onChange={(next) => {
+              void applyPatch('mode', { mode: next }, { mode: next as JevStatus['mode'] })
+            }}
+          />
+        </div>
       )}
-
-      {status === null || !status.enabled || status.mode !== 'shadow' ? null : (
-        <div className="jev-banner">观察模式：决策只记录，不拦截也不放行；确认判断符合预期后再切到执行。</div>
-      )}
-
-      {status === null ? null : (
-        <nav className="jev-tabs" role="tablist">
-          {TABS.map(item => (
+      {status !== null && (
+        <nav
+          className="jev-tabs"
+          role="tablist"
+          aria-label="Jev 面板"
+          onKeyDown={(event) => {
+            const index = TABS.findIndex((item) => item.id === tab)
+            const next =
+              event.key === 'ArrowRight'
+                ? (index + 1) % TABS.length
+                : event.key === 'ArrowLeft'
+                  ? (index + TABS.length - 1) % TABS.length
+                  : event.key === 'Home'
+                    ? 0
+                    : event.key === 'End'
+                      ? TABS.length - 1
+                      : -1
+            if (next < 0) return
+            event.preventDefault()
+            const target = TABS[next]!
+            setTab(target.id)
+            document.getElementById(`jev-tab-${target.id}`)?.focus()
+          }}
+        >
+          {TABS.map((item) => (
             <button
               key={item.id}
+              id={`jev-tab-${item.id}`}
               role="tab"
               type="button"
               className="jev-tab"
               data-on={tab === item.id ? '1' : '0'}
               aria-selected={tab === item.id}
-              onClick={() => { setTab(item.id) }}
+              aria-controls="jev-tabpanel"
+              tabIndex={tab === item.id ? 0 : -1}
+              onClick={() => {
+                setTab(item.id)
+              }}
             >
+              <Icon name={item.icon} size={15} />
               {item.label}
-              {item.id === 'log' && log.length > 0 ? <span className="jev-tab-count">{fmtNum(log.length)}</span> : null}
+              {item.id === 'log' && log.length > 0 && (
+                <span className="jev-tab-count">{fmtNum(log.length)}</span>
+              )}
             </button>
           ))}
+          <span className="jev-live" title={autoRefresh ? '每 20 秒自动刷新，后台暂停' : '自动刷新已暂停'}>
+            <i className="jev-dot" style={{ color: autoRefresh ? TONE.ok : TONE.muted }} />
+            {updatedAt > 0 ? `${clockOf(new Date(updatedAt).toISOString())} 更新` : '等待读取'}
+          </span>
         </nav>
       )}
-
-      {loading && status === null ? (
-        <div className="jev-empty">
-          <b>正在连接本地 API…</b>
-          <div>首次加载会拉取状态、统计与最近 80 条决策。</div>
+      {loadErr !== '' && status !== null && (
+        <div className="jev-toast jev-feedback" role="alert" data-tone="err">
+          {loadErr} 当前显示上次成功读取的数据。
         </div>
-      ) : null}
-
-      {status === null ? null : (
-        // tab 内容区自带滚动（flex:1 + min-height:0）：不依赖 dsh 布局的父级
-        // 高度链（centerCol 是 overflow:hidden 裁剪容器，外部滚动不可用）。
-        // 主路径（分页 20 条/页）不依赖滚动，这里只是长内容（概览/设置）的兜底。
-        <div className="jev-tab-body" style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>
+      )}
+      {dataWarning !== '' && status !== null && (
+        <div className="jev-toast jev-feedback" role="status" data-tone="warn">
+          {dataWarning}暂不可用，可能显示上次数据。请刷新重试。
+        </div>
+      )}
+      {toast !== null && (
+        <div
+          className="jev-toast jev-feedback"
+          role={toast.tone === 'err' ? 'alert' : 'status'}
+          data-tone={toast.tone}
+        >
+          {toast.text}
+        </div>
+      )}
+      {status !== null &&
+        status.enabled &&
+        (status.dailyCostLimitUsd ?? 0) > 0 &&
+        (status.costTodayUsd ?? 0) >= status.dailyCostLimitUsd! && (
+          <div className="jev-toast jev-feedback" role="status" data-tone="warn">
+            今日已达成本限额，新增判断将降级回原生流程。
+          </div>
+        )}
+      {loading && status === null && (
+        <div className="jev-tab-body">
+          <div className="jev-empty" role="status">
+            <Icon name="activity" size={28} />
+            <b>正在读取决策数据</b>
+            <div>连接本地服务，加载状态与最近记录。</div>
+          </div>
+        </div>
+      )}
+      {status !== null && (
+        <div
+          className="jev-tab-body"
+          id="jev-tabpanel"
+          role="tabpanel"
+          aria-labelledby={`jev-tab-${tab}`}
+          key={tab}
+        >
           {tab === 'overview'
             ? renderOverview()
             : tab === 'log'
@@ -1793,16 +2399,23 @@ export function JevPage(_props: JevPageProps): React.JSX.Element {
                 : renderSettings()}
         </div>
       )}
-
-      {status === null && !loading ? (
-        <div className="jev-empty">
-          <b>面板暂时读不到状态</b>
-          <div>{loadErr.length === 0 ? '宿主半没有响应。' : loadErr}</div>
-          <div className="jev-row-actions">
-            <button className="jev-btn" onClick={() => { void load(false) }}>重试</button>
+      {status === null && !loading && (
+        <div className="jev-tab-body">
+          <div className="jev-empty">
+            <Icon name="info" size={28} />
+            <b>暂时无法连接决策服务</b>
+            <div>{loadErr || '请确认本地宿主正在运行。'}</div>
+            <button
+              className="jev-btn"
+              onClick={() => {
+                void load(false)
+              }}
+            >
+              重新连接
+            </button>
           </div>
         </div>
-      ) : null}
+      )}
     </div>
   )
 }

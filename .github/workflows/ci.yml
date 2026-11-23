@@ -23,7 +23,7 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Typecheck (src + tests)
+      - name: Typecheck (src + tests + panel)
         run: npm run typecheck
 
       - name: Tests

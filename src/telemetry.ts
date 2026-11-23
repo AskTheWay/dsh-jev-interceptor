@@ -44,6 +44,8 @@ export interface TelemetryEntry {
   readonly callId?: string
   /** Model version reported by the provider. */
   readonly model?: string
+  /** Configured request model for degraded calls, where no answer identified a version. */
+  readonly requestModel?: string
   /** Action taken (or that would have been taken in shadow mode). */
   readonly action: DecisionAction
   /** Human-readable decision detail (risk, confidence, degrade reason...). */

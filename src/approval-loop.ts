@@ -23,10 +23,17 @@ import type { Telemetry } from './telemetry.js'
 /** What the pre-approver concluded for one ask. */
 export type JevVerdict = 'auto-approve' | 'human' | 'not-evaluated'
 
+interface VerdictContext {
+  readonly mode: LiveSettings['mode']
+  readonly model?: string
+}
+
 /** One correlation record produced when the outcome lands. */
 export interface ApprovalAgreement {
   readonly tool: string
   readonly sessionId: string
+  readonly callId?: string
+  readonly context?: VerdictContext
   readonly jev: JevVerdict
   readonly human: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
   /** Coarse bucket for quick scanning in telemetry. */
@@ -40,7 +47,7 @@ export interface ApprovalAgreement {
 
 /** Correlation state for in-flight approval asks. */
 export class ApprovalTrace {
-  private readonly asks = new Map<string, { tool: string; sessionId: string; callId?: string; verdict?: JevVerdict }>()
+  private readonly asks = new Map<string, { tool: string; sessionId: string; callId?: string; verdict?: JevVerdict; context?: VerdictContext }>()
   private readonly latestByCall = new Map<string, string>()
 
   /**
@@ -53,7 +60,7 @@ export class ApprovalTrace {
   noteAsked(id: string, sessionId: string, tool: string, callId?: string): void {
     if (this.asks.size >= 128) {
       const oldest = this.asks.keys().next()
-      if (oldest.done !== true) this.asks.delete(oldest.value)
+      if (oldest.done !== true) this.takeAsk(oldest.value)
     }
     this.asks.set(id, { tool, sessionId, callId })
     if (callId !== undefined) this.latestByCall.set(`${sessionId}\0${callId}`, id)
@@ -66,14 +73,26 @@ export class ApprovalTrace {
    * @param verdict - what Jev concluded (or `not-evaluated` when the
    *   pre-approver had no opinion: disabled, no evidence, degraded).
    */
-  noteVerdict(sessionId: string, callId: string | undefined, verdict: JevVerdict): void {
+  noteVerdict(sessionId: string, callId: string | undefined, verdict: JevVerdict, context?: VerdictContext): void {
     if (callId === undefined) return
     const id = this.latestByCall.get(`${sessionId}\0${callId}`)
     if (id === undefined) return
     const ask = this.asks.get(id)
-    if (ask !== undefined && ask.verdict === undefined) ask.verdict = verdict
+    if (ask !== undefined && ask.verdict === undefined) {
+      ask.verdict = verdict
+      ask.context = context
+    }
   }
 
+  private takeAsk(id: string) {
+    const ask = this.asks.get(id)
+    this.asks.delete(id)
+    if (ask?.callId !== undefined) {
+      const key = `${ask.sessionId}\0${ask.callId}`
+      if (this.latestByCall.get(key) === id) this.latestByCall.delete(key)
+    }
+    return ask
+  }
   /**
    * Consume one durable outcome (from `approval/decided`) and produce the
    * agreement record when Jev had an opinion on that ask.
@@ -83,8 +102,7 @@ export class ApprovalTrace {
    *   (`not-evaluated` asks carry no comparison value).
    */
   onDecided(id: string, human: ApprovalAgreement['human']): ApprovalAgreement | undefined {
-    const ask = this.asks.get(id)
-    this.asks.delete(id)
+    const ask = this.takeAsk(id)
     if (ask === undefined || ask.verdict === undefined || ask.verdict === 'not-evaluated') return undefined
     let bucket: ApprovalAgreement['bucket']
     if (ask.verdict === 'auto-approve' && (human === 'rejected' || human === 'cancelled')) bucket = 'would-over-approve'
@@ -92,7 +110,7 @@ export class ApprovalTrace {
     else if (ask.verdict === 'human' && human === 'allowed-once') bucket = 'friction-human-approved'
     else if (ask.verdict === 'human' && human === 'rejected') bucket = 'aligned-reject'
     else bucket = 'neutral'
-    return { tool: ask.tool, sessionId: ask.sessionId, jev: ask.verdict, human, bucket }
+    return { tool: ask.tool, sessionId: ask.sessionId, callId: ask.callId, context: ask.context, jev: ask.verdict, human, bucket }
   }
 }
 
@@ -124,9 +142,11 @@ export function createApprovalLoopListener(
       deps.telemetry.record({
         ts: new Date().toISOString(),
         tag: 'approval-loop',
-        mode: deps.live().mode,
+        mode: agreement.context?.mode ?? deps.live().mode,
         tool: agreement.tool,
         sessionId: agreement.sessionId,
+        ...(agreement.callId === undefined ? {} : { callId: agreement.callId }),
+        ...(agreement.context?.model === undefined ? {} : { model: agreement.context.model }),
         action: 'agreement',
         detail: `jev=${agreement.jev} human=${agreement.human} ${agreement.bucket}`,
       })

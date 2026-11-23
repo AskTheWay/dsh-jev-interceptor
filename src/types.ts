@@ -5,8 +5,8 @@
  * guard adds questions at near-zero latency cost.
  *
  * The same payload shape is accepted by the TypeSafe endpoint
- * (`POST /v1/systemone`) and by OpenRouter's decisions endpoint
- * (`POST /api/alpha/decisions`, model `~typesafe/jev-latest`).
+ * (`POST /v1/systemone`) and by OpenRouter's System One compatibility endpoint
+ * (`POST /api/v1/systemone`).
  * @module dsh-jev-interceptor/types
  */
 

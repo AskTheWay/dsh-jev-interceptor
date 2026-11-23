@@ -31,7 +31,8 @@
   "scripts": {
     "build": "tsdown",
     "clean": "node -e \"fs.rmSync('lib', {force: true, recursive: true})\" --input-type=module 2>/dev/null || rimraf lib",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json && tsc -p tsconfig.client.json",
+    "preview:ui": "node scripts/preview.mjs",
     "test": "vitest run",
     "prepare": "npm run build"
   },
@@ -75,12 +76,14 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/cordis-plugin-loader": "~1.1.0",
     "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-layout": "^0.2.2-rc.3",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.2-rc.3",
     "@deepseek-ai/dsh-commands": "0.2.2-rc.3",
     "@deepseek-ai/dsh-compaction": "0.2.2-rc.3",
     "@deepseek-ai/dsh-credentials": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-error": "0.2.2-rc.3",
     "@deepseek-ai/dsh-home-paths": "0.2.2-rc.3",
     "@deepseek-ai/dsh-launch-environment": "0.2.2-rc.3",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
@@ -96,11 +99,13 @@
     "@deepseek-ai/schemastery": "^3.19.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
     "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "tsdown": "^0.23.1",
     "typescript": "^5.8.0",
-    "vitest": "^3.0.0",
-    "@deepseek-ai/dsh-error": "0.2.2-rc.3"
+    "vitest": "^3.0.0"
   },
   "author": "AskTheWay",
   "repository": {

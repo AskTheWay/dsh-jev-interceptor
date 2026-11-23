@@ -3,23 +3,20 @@
  * (provider typesafe, default) or OPENROUTER_API_KEY (pass --openrouter).
  * Usage: node scripts/smoke.mjs [--openrouter]
  */
-import { JevClient, Telemetry } from '../lib/index.js'
+import { JevClient, resolveEndpoint, resolveSettings, Telemetry } from '../lib/index.js'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const openrouter = process.argv.includes('--openrouter')
-const apiKeyEnv = openrouter ? 'OPENROUTER_API_KEY' : 'TYPESAFE_API_KEY'
+const config = { provider: process.argv.includes('--openrouter') ? 'openrouter' : 'typesafe' }
+const { apiKeyEnv } = resolveSettings(config)
 const key = process.env[apiKeyEnv]
 if (key === undefined || key.length === 0) {
   console.error(`set ${apiKeyEnv} first`)
   process.exit(1)
 }
 
-const endpoint = openrouter
-  ? 'https://openrouter.ai/api/alpha/decisions'
-  : 'https://api.typesafe.ai/v1/systemone'
-const model = openrouter ? '~typesafe/jev-latest' : 'jev-latest'
+const { endpoint, model } = resolveEndpoint(config)
 
 const dir = await mkdtemp(join(tmpdir(), 'dsh-jev-smoke-'))
 const client = new JevClient({

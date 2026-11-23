@@ -27,14 +27,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, LlmCallConfig, UserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionReferenceError, SessionReferenceResolver } from '@deepseek-ai/dsh-session-reference'
+import { SessionReferenceResolver } from '@deepseek-ai/dsh-session-reference'
 import type { Config as BaseConfig, SessionReferenceInput } from '@deepseek-ai/dsh-session-reference'
 // Type-only: registers the 'sessionQuery' Context key used by the pre-warm reads.
 import type {} from '@deepseek-ai/dsh-session-query'
 import type { SessionSurfaceSnapshot } from '@deepseek-ai/dsh-session-query'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import {
   cjkRatio,
   previewAt,
@@ -45,6 +43,7 @@ import {
   type ReferenceRetentionStats,
 } from './retention.js'
 import { JevClient } from './jev.js'
+import { providerConnection, providerCredential } from './provider.js'
 import { Telemetry } from './telemetry.js'
 import { score as scoreQuestion } from './types.js'
 
@@ -110,7 +109,7 @@ export const Config: z<Config> = z.object({
   provider: z.union(['typesafe', 'openrouter', 'custom']).default('typesafe'),
   endpoint: z.string(),
   model: z.string(),
-  apiKeyEnv: z.string().role('credential-ref').default('TYPESAFE_API_KEY'),
+  apiKeyEnv: z.string().role('credential-ref'),
   timeoutMs: z.number().step(1).min(100).default(2500),
   cooldownMs: z.number().step(1).min(1000).default(60_000),
   failureThreshold: z.number().step(1).min(1).default(3),
@@ -172,30 +171,18 @@ export default class JevSessionReferenceResolver extends SessionReferenceResolve
             ? config.telemetryDir
             : dshHomePath('plugins', 'dsh-jev-interceptor'),
         )
-        const { endpoint, model } = resolveProvider(config)
-        const ref = credentialRef(config.apiKeyEnv ?? 'TYPESAFE_API_KEY')
-        const resolveKey = async (): Promise<string | undefined> => {
-          const credentials = ctx.get('credentials')
-          if (credentials !== undefined) {
-            const hit = await credentials.resolve(ref)
-            if (hit !== undefined && hit.value.length > 0) return hit.value
-            return undefined
-          }
-          const ambient = launchEnvironmentOf(ctx).get(ref)
-          if (ambient !== undefined && ambient.value.length > 0) return ambient.value
-          return undefined
-        }
+        const connection = providerConnection(config)
         this.scoring = {
           mode: config.mode ?? 'shadow',
           jev: new JevClient({
-            endpoint,
-            model,
+            endpoint: connection.endpoint,
+            model: connection.model,
             timeoutMs: config.timeoutMs ?? 2500,
             cooldownMs: config.cooldownMs ?? 60_000,
             failureThreshold: config.failureThreshold ?? 3,
             maxConcurrency: config.maxConcurrency ?? 4,
             cacheSize: config.cacheSize ?? 512,
-            resolveKey,
+            resolveKey: async () => (await providerCredential(ctx, connection)).key,
             telemetry,
             logger: ctx.logger,
           }),
@@ -496,27 +483,4 @@ export function messageScores(
  */
 function cacheKey(sessionId: string, snapshot: SessionSurfaceSnapshot): string {
   return `${sessionId}\0${snapshot.capturedThroughSeq ?? 'null'}`
-}
-
-/** Resolve endpoint and model for the configured provider (shared vocabulary with the interceptor). */
-function resolveProvider(config: Config): { endpoint: string; model: string } {
-  if (config.provider === 'openrouter') {
-    return {
-      endpoint: config.endpoint ?? 'https://openrouter.ai/api/alpha/decisions',
-      model: config.model ?? '~typesafe/jev-latest',
-    }
-  }
-  if (config.provider === 'custom') {
-    if (config.endpoint === undefined || config.model === undefined) {
-      throw new SessionReferenceError(
-        'jev-session-reference: provider "custom" requires endpoint and model',
-        'SESSION_REFERENCE_INVALID_CONFIG',
-      )
-    }
-    return { endpoint: config.endpoint, model: config.model }
-  }
-  return {
-    endpoint: config.endpoint ?? 'https://api.typesafe.ai/v1/systemone',
-    model: config.model ?? 'jev-latest',
-  }
 }

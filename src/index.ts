@@ -21,10 +21,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
-// Type-only: registers the 'settings' Context key used by installSection.
+// Type-only: registers the optional 'settings' Context key.
 import type {} from '@deepseek-ai/dsh-settings'
-import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 // Type-only: registers the 'permissionPresets' Context key so `ctx.get` below
 // typechecks; the service itself is consumed structurally and the package is
 // not a runtime dependency.
@@ -51,9 +49,13 @@ const jevAllowlistDefinitionId: CommandDefinitionIdBrand = 'dsh-jev-interceptor:
 import type {} from '@deepseek-ai/dsh-user-approval/types'
 import {
   Config,
+  OPENROUTER_ENDPOINT,
+  TYPESAFE_ENDPOINT,
   SETTINGS_NS,
   liveOf,
-  resolveEndpoint,
+  hasLiveConfig,
+  readProfileConfig,
+  resolveCredentialName,
   resolveSettings,
   type LiveSettings,
   type ResolvedSettings,
@@ -66,8 +68,21 @@ import { ApprovalTrace, createApprovalLoopListener } from './approval-loop.js'
 import { createImageOffloadListener } from './image-offload.js'
 import { createStagnationListener, StagnationTracker, type StagnationThresholds } from './stagnation.js'
 import { createUntrustedScanListener, UntrustedMarks } from './untrusted.js'
-import { registerJevApi } from './jev-api.js'
-import { approvalBucketsOf, assessReadiness, calibrate, renderCalibration, suggestAllowlist, THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness, type ThresholdsInput } from './calibrate.js'
+import { registerJevApi, type ConfigUpdateResult, type JevPanelStatus } from './jev-api.js'
+import { providerConnection, providerCredential, type KeySource, type ProviderConnection } from './provider.js'
+import {
+  approvalBucketsOf,
+  assessReadiness,
+  calibrate,
+  calibrationWindow,
+  isCalibrationModel,
+  renderCalibration,
+  suggestAllowlist,
+  THRESHOLD_KEYS,
+  type CalibrationReport,
+  type ShadowReadiness,
+  type ThresholdsInput,
+} from './calibrate.js'
 import {
   CalibrationHistory,
   compareWithPrevious,
@@ -78,6 +93,7 @@ import {
 import { renderImpact, summarizeImpact, type ImpactSummary } from './impact.js'
 import { parseLogArgs, renderLogTable, toLogCsv, toLogJson } from './telemetry.js'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'dsh-jev-interceptor'
@@ -94,7 +110,7 @@ export { Config } from './config.js'
 export type { Config as ConfigType } from './config.js'
 export { resolveSettings, resolveEndpoint, DEFAULTS } from './config.js'
 export { JevClient } from './jev.js'
-export type { ClassifyResult, ClassifyCall, DegradeReason } from './jev.js'
+export type { ClassifyResult, ClassifyCall, DegradeReason, JevConnection } from './jev.js'
 export { Telemetry } from './telemetry.js'
 export type { TelemetryEntry, DecisionTag, DecisionAction } from './telemetry.js'
 export { noul, choice, score } from './types.js'
@@ -134,12 +150,13 @@ function thresholdsOf(s: ResolvedSettings): ThresholdsInput {
  * Mount the guard and pre-approval hooks, the shared Jev client, telemetry,
  * and the `/jev-stats` command.
  * @param ctx - plugin context.
- * @param config - YAML-validated plugin configuration.
+ * @param profileConfig - plugin config with live references on current hosts.
  */
-export function apply(ctx: Context, config: Config): void {
-  const { endpoint, model } = resolveEndpoint(config)
+export function apply(ctx: Context, profileConfig: Config | ReturnType<typeof Config>): void {
+  const config = readProfileConfig(profileConfig)
   const settings = resolveSettings(config)
   const telemetry = new Telemetry(settings.telemetryDir)
+  const calibrationHistory = new CalibrationHistory(settings.telemetryDir)
   const pendingAsks = new PendingAsks()
   const approvalTrace = new ApprovalTrace()
   const untrustedMarksStore = new UntrustedMarks()
@@ -149,26 +166,37 @@ export function apply(ctx: Context, config: Config): void {
    * → 桶变化」，再把本次快照追加进历史（5 分钟去抖）。命令与面板共用；
    * 定义在 apply 内以闭包 telemetry 与 settings（与挂点同一实例）。
    */
-  const buildCalibration = async (full: boolean): Promise<{ report: CalibrationReport; extras: string[] }> => {
-    const entries = await telemetry.entries(full ? undefined : 2000)
-    // 基线与挂点 getter 同源（活配置）：「应用」后重新生成的报告立即以新值
-    // 为 current，采纳标记/落盘快照不与热生效事实脱节。
-    const thresholds = thresholdsOf(resolveSettings(configOverride ?? config))
-    const liveAllowlist = resolveSettings(configOverride ?? config).preapproveToolAllowlist
-    const report = calibrate(entries, thresholds)
-    // 预批准候选：从 guard 影子数据推导，只推不在名单里的新工具。
-    const suggestions = suggestAllowlist(entries).filter(s => !liveAllowlist.has(s.tool))
-    const reportWithSuggestions: CalibrationReport = suggestions.length === 0
-      ? report
-      : { ...report, allowlistSuggestions: suggestions }
+  const buildCalibration = async (full: boolean, selectedModel?: string): Promise<{ report: CalibrationReport; extras: string[] }> => {
+    const window = await telemetry.entries(full ? undefined : 2000)
+    const currentModel = activeCalibrationModel()
+    const { scope, entries } = calibrationWindow(window, currentModel, selectedModel)
+    const liveSettings = resolveSettings(activeConfig())
+    const thresholds = thresholdsOf(liveSettings)
+    const metrics = calibrate(entries, thresholds)
+    const report: CalibrationReport = {
+      ...metrics,
+      scope,
+      observations: entries.length > 0 ? metrics.observations : [{
+        param: '—',
+        reason: scope.model === null ? '先测试连接或等待服务返回模型版本。'
+          : '本窗口没有该版本的决策样本。可切换到历史版本查看报告，或继续采集当前版本的观察记录。',
+      }],
+    }
+    if (scope.model === null || scope.model !== scope.currentModel || entries.length === 0) {
+      return { report, extras: [] }
+    }
+
+    // Older high-risk examples still veto a candidate. Only the active model supplies positive evidence.
+    const eligible = new Set(suggestAllowlist(window).map(item => item.tool))
+    const suggestions = suggestAllowlist(entries).filter(item => !liveSettings.preapproveToolAllowlist.has(item.tool) && eligible.has(item.tool))
+    const reportWithSuggestions = suggestions.length === 0 ? report : { ...report, allowlistSuggestions: suggestions }
     const buckets = approvalBucketsOf(entries)
-    const history = new CalibrationHistory(settings.telemetryDir)
-    const recentSnapshots = await history.recent(1)
+    const recentSnapshots = await calibrationHistory.recent(1, scope.model)
     const previous = recentSnapshots.at(-1)
     // 传本次窗口大小：与上次口径不同（--all vs 尾窗）时桶变化不可比。
     const comparison = compareWithPrevious(thresholds, previous, buckets, report.windowSize)
     const snapshot = snapshotOf(report, thresholds, new Date().toISOString(), buckets)
-    if (shouldAppend(previous, snapshot)) history.append(snapshot)
+    if (scope.model === activeCalibrationModel() && shouldAppend(previous, snapshot)) calibrationHistory.append(snapshot)
     return {
       report: comparison.previousTs === undefined
         ? reportWithSuggestions
@@ -185,13 +213,76 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  // Live settings: the plugin Config is registered with the settings provider
-  // so the Settings → Plugins page renders a form (provider, model, apiKey,
-  // mode, etc.) and /jev-key persists through the user layer. On generations
-  // without the service, the row config stays the whole truth.
-  let liveOverride: LiveSettings | undefined
-  let configOverride: Config | undefined
-  const live = (): LiveSettings => liveOverride ?? liveOf(configOverride ?? config)
+  // Apply changes immediately, including on profiles that cannot persist them.
+  let sourceConfig = profileConfig
+  const overrides = new Map<string, { value: unknown }>()
+  const activeConfig = (): Config => {
+    const loaded = readProfileConfig(sourceConfig)
+    return overrides.size === 0 ? loaded : {
+      ...loaded,
+      ...Object.fromEntries([...overrides].map(([key, entry]) => [key, entry.value])),
+    }
+  }
+  const live = (): LiveSettings => {
+    const cfg = activeConfig()
+    syncConnection(cfg)
+    return liveOf(cfg)
+  }
+  const jev = new JevClient({
+    connection: undefined,
+    cooldownMs: settings.cooldownMs,
+    failureThreshold: settings.failureThreshold,
+    maxConcurrency: settings.maxConcurrency,
+    cacheSize: settings.cacheSize,
+    dailyCostLimitUsd: () => activeConfig().dailyCostLimitUsd ?? 0,
+    telemetry,
+    logger: ctx.logger,
+  })
+
+  let route: ProviderConnection | undefined
+  let routeConfig: Config | undefined
+  let connectionError: string | undefined
+  const syncConnection = (cfg = activeConfig()): void => {
+    if (routeConfig !== undefined
+      && routeConfig.provider === cfg.provider
+      && routeConfig.endpoint === cfg.endpoint
+      && routeConfig.model === cfg.model
+      && routeConfig.apiKey === cfg.apiKey
+      && routeConfig.apiKeyEnv === cfg.apiKeyEnv
+      && routeConfig.timeoutMs === cfg.timeoutMs) return
+    routeConfig = {
+      provider: cfg.provider,
+      endpoint: cfg.endpoint,
+      model: cfg.model,
+      apiKey: cfg.apiKey,
+      apiKeyEnv: cfg.apiKeyEnv,
+      timeoutMs: cfg.timeoutMs,
+    }
+    let next: ProviderConnection
+    try {
+      next = providerConnection(cfg)
+    } catch (error) {
+      if (route !== undefined) jev.setConnection(undefined)
+      route = undefined
+      connectionError = error instanceof Error ? error.message : '连接配置无效。'
+      return
+    }
+    connectionError = undefined
+    const timeoutMs = resolveSettings(cfg).timeoutMs
+    route = next
+    jev.setConnection({ ...next, timeoutMs, resolveKey: async () => (await providerCredential(ctx, next)).key })
+  }
+  syncConnection()
+
+  const activeCalibrationModel = (): string | null => {
+    syncConnection()
+    const reported = jev.reportedModel()
+    if (reported !== undefined) return isCalibrationModel(reported) ? reported : null
+    // Known pins can reuse their exact history before the first request of this process.
+    if (route?.endpoint === TYPESAFE_ENDPOINT && /^jev-\d+\.\d+\.\d+$/.test(route.model)) return route.model
+    if (route?.endpoint === OPENROUTER_ENDPOINT && /-\d{8}$/.test(route.model)) return route.model
+    return null
+  }
 
   /**
    * 探测 settings 服务的落盘路径（documentPath）：null 表示非 file provider
@@ -200,10 +291,10 @@ export function apply(ctx: Context, config: Config): void {
    */
   const settingsPersistPath = (): string | null => {
     try {
-      const s = ctx.get('settings') as { documentPath?: () => unknown } | undefined
-      if (s !== undefined && typeof s.documentPath === 'function') {
-        const p = s.documentPath()
-        if (typeof p === 'string' && p.length > 0) return p
+      const service = ctx.get('settings') as { documentPath?: string | (() => unknown); writable?: boolean } | undefined
+      if (service !== undefined && service.writable !== false) {
+        const path = typeof service.documentPath === 'function' ? service.documentPath() : service.documentPath
+        if (typeof path === 'string' && path.length > 0) return path
       }
     } catch {
       // 探测失败按无持久化处理（诚实降级）。
@@ -211,145 +302,180 @@ export function apply(ctx: Context, config: Config): void {
     return null
   }
 
-  // Register our Config schema with the settings provider → the Plugins page
-  // discovers it via describe() and renders the form. 0.2.x hosts expose a
-  // different service shape (installSection absent) — registration is
-  // best-effort; the Web panel remains the primary config surface either way.
+  // Use the custom panel for edits that require a provider and credential to change together.
+  // Earlier hosts publish settings through installSection.
   ctx.inject(['settings'], (settingsCtx) => {
     try {
-      const service = settingsCtx.settings as unknown as {
+      const service = settingsCtx.settings
+      if (typeof service.configure === 'function') {
+        settingsCtx.effect(() => service.configure({ auto: false }, ctx.fiber))
+      }
+      const legacy = service as unknown as {
         installSection?: (owner: Context, ns: string, schema: unknown, entry: unknown, hooks: {
           setSource?: (source: unknown) => void
         }) => void
       }
-      if (typeof service.installSection !== 'function') {
-        ctx.logger.info('dsh-jev-interceptor: settings service has no installSection (0.2.x shape) — panel is the config surface')
-        return
-      }
-      service.installSection(ctx, 'jev-interceptor', Config, config, {
+      legacy.installSection?.(ctx, SETTINGS_NS, Config, config, {
         setSource: (source) => {
           if (typeof source === 'object' && source !== null) {
-            configOverride = source as Config
+            sourceConfig = source as Config
+            syncConnection()
           }
         },
       })
-      ctx.logger.info('dsh-jev-interceptor: Settings form registered — configure in Settings → Plugins')
     } catch (error: unknown) {
       ctx.logger.warn(`dsh-jev-interceptor: Settings registration failed (${error instanceof Error ? error.message : String(error)})`)
     }
   })
 
-  const ref = credentialRef(settings.apiKeyEnv)
-  const resolveKey = async (): Promise<string | undefined> => {
-    // Direct config value (set via /jev-key or Settings form) takes precedence.
-    const apiKey = (configOverride ?? config).apiKey
-    if (apiKey !== undefined && apiKey.length > 0) return apiKey
-    const credentials = ctx.get('credentials')
-    if (credentials !== undefined) {
-      // The seam owns the whole credential plane when present: a miss does not
-      // fall through to ambient values (mirrors the llm-deepseek precedent).
-      const hit = await credentials.resolve(ref)
-      if (hit !== undefined && hit.value.length > 0) return hit.value
-      return undefined
+  const getStatus = async (): Promise<JevPanelStatus> => {
+    syncConnection()
+    const connection = route
+    let keySource: KeySource = 'none'
+    let keyError: string | undefined
+    if (connection !== undefined) {
+      try { keySource = (await providerCredential(ctx, connection)).source } catch {
+        keyError = '凭据服务暂不可用。'
+      }
     }
-    // Without the credentials seam the launching environment is the whole credential plane.
-    const ambient = launchEnvironmentOf(ctx).get(ref)
-    if (ambient !== undefined && ambient.value.length > 0) return ambient.value
-    return undefined
+    const currentConfig = activeConfig()
+    syncConnection(currentConfig)
+    const current = route
+    if (current !== connection) {
+      keySource = current?.apiKey === undefined ? 'none' : 'config'
+      keyError = undefined
+    }
+    return {
+      ...liveOf(currentConfig),
+      provider: currentConfig.provider ?? 'typesafe',
+      model: current?.model ?? currentConfig.model ?? '',
+      activeModel: activeCalibrationModel(),
+      endpointOrigin: current?.origin ?? null,
+      connectionError,
+      keyConfigured: keySource !== 'none',
+      keyReference: resolveCredentialName(currentConfig),
+      keySource,
+      keyError,
+      persistPath: settingsPersistPath(),
+      costTodayUsd: jev.costTodayUsd(),
+      dailyCostLimitUsd: currentConfig.dailyCostLimitUsd ?? 0,
+      preapproveAllowlist: [...new Set(currentConfig.preapproveToolAllowlist ?? [])].sort(),
+      guardEnabled: settings.guardEnabled,
+      preapproveEnabled: settings.preapproveEnabled,
+      stagnationEnabled: settings.stagnationEnabled,
+    }
   }
 
-  const jev = new JevClient({
-    endpoint,
-    model,
-    timeoutMs: settings.timeoutMs,
-    cooldownMs: settings.cooldownMs,
-    failureThreshold: settings.failureThreshold,
-    maxConcurrency: settings.maxConcurrency,
-    cacheSize: settings.cacheSize,
-    // getter 形态：Settings 表单热改限额即生效（与 8 阈值同一模式），显示与执行同源。
-    dailyCostLimitUsd: () => resolveSettings(configOverride ?? config).dailyCostLimitUsd,
-    resolveKey,
-    telemetry,
-    logger: ctx.logger,
-  })
+  const updateConfig = async (request: Record<string, unknown>): Promise<ConfigUpdateResult> => {
+    const { calibrationModel, calibrationCurrent, ...patch } = request
+    if (calibrationModel !== undefined || calibrationCurrent !== undefined) {
+      if (typeof calibrationModel !== 'string' || calibrationModel !== activeCalibrationModel()) {
+        return { error: '当前模型已变更，请重新生成校准报告。' }
+      }
+      const thresholds = thresholdsOf(resolveSettings(activeConfig()))
+      const param = CALIBRATABLE_KEYS.find(key => Object.hasOwn(patch, key))
+      if (Object.keys(patch).length !== 1 || (param === undefined && !Object.hasOwn(patch, 'preapproveToolAllowlist'))) {
+        return { error: '每次应用一项校准建议。' }
+      }
+      if (param !== undefined && thresholds[param] !== calibrationCurrent) {
+        return { error: '当前阈值已变更，请重新生成校准报告。' }
+      }
+    }
+    if ('enabled' in patch && typeof patch.enabled !== 'boolean') return { error: '启用状态必须为布尔值。' }
+    if ('mode' in patch && patch.mode !== 'shadow' && patch.mode !== 'enforce') return { error: '请选择观察或执行模式。' }
+    if ('provider' in patch && patch.provider !== 'typesafe' && patch.provider !== 'openrouter' && patch.provider !== 'custom') {
+      return { error: '未知的决策服务。' }
+    }
+    const textFields = ['endpoint', 'model', 'apiKeyEnv', 'apiKey'] as const
+    for (const field of textFields) {
+      if (!Object.hasOwn(patch, field)) continue
+      const value = patch[field]
+      if (typeof value !== 'string') return { error: `${field} 必须为文本。` }
+      patch[field] = value.trim()
+    }
+    if (typeof patch.apiKey === 'string' && patch.apiKey.length > 0 && patch.apiKey.length < 10) {
+      return { error: 'API Key 至少需要 10 个字符。' }
+    }
+    for (const key of CALIBRATABLE_KEYS) {
+      if (!Object.hasOwn(patch, key)) continue
+      const value = patch[key]
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+        return { error: `${key} 必须是 0 到 1 之间的数字。` }
+      }
+    }
+    if ('preapproveToolAllowlist' in patch && (!Array.isArray(patch.preapproveToolAllowlist)
+      || patch.preapproveToolAllowlist.some(item => typeof item !== 'string' || item.length === 0))) {
+      return { error: '预批准名单必须是工具名称列表。' }
+    }
+
+    const cfg = activeConfig()
+    syncConnection(cfg)
+    const next = { ...cfg, ...patch }
+    if ('provider' in patch || textFields.some(field => Object.hasOwn(patch, field))) {
+      let connection: ProviderConnection
+      try { connection = providerConnection(next) } catch (error) {
+        return { error: error instanceof Error ? error.message : '连接配置无效。' }
+      }
+      const changesTarget = connection.provider !== route?.provider || connection.origin !== route?.origin
+      if (changesTarget) {
+        if ((cfg.apiKey?.trim() && !Object.hasOwn(patch, 'apiKey')) || (cfg.apiKeyEnv?.trim() && !Object.hasOwn(patch, 'apiKeyEnv'))) {
+          return { error: '切换服务或地址时，请为新连接选择凭据。' }
+        }
+        if (connection.provider === 'custom' && connection.apiKey === undefined
+          && !(typeof patch.apiKeyEnv === 'string' && patch.apiKeyEnv.length > 0)) {
+          return { error: '切换到自定义地址时，需要为该地址指定凭据引用或新的 API Key。' }
+        }
+      }
+    }
+    const pending = Object.entries(patch).map(([key, value]) => [key, { value }] as const)
+    for (const [key, entry] of pending) overrides.set(key, entry)
+    syncConnection(next)
+    try {
+      const service = ctx.get('settings')
+      if (service !== undefined && typeof service.update === 'function' && service.writable !== false) {
+        const previousSource = sourceConfig
+        await service.update(SETTINGS_NS, patch)
+        if (sourceConfig !== previousSource || hasLiveConfig(sourceConfig)) {
+          const loaded = readProfileConfig(sourceConfig)
+          for (const [key, entry] of pending) {
+            if (overrides.get(key) === entry && isDeepStrictEqual(loaded[key as keyof Config], entry.value)) overrides.delete(key)
+          }
+          syncConnection()
+        }
+        return { persisted: settingsPersistPath() !== null }
+      }
+    } catch {
+      ctx.logger.warn('dsh-jev-interceptor: settings update failed; changes are in-memory only')
+    }
+    return { persisted: false }
+  }
 
   // Panel API: browser-side settings page fetches from these routes.
   // Wrapped in inject to defer registration until the connection service is available.
   ctx.inject(['connection'], () => {
-  registerJevApi(ctx, {
-    getStatus: () => {
-      const s = live()
-      const cfg = configOverride ?? config
-      return {
-        enabled: s.enabled,
-        mode: s.mode,
-        provider: cfg.provider ?? 'typesafe',
-        model: resolveEndpoint(cfg).model,
-        keyConfigured: cfg.apiKey !== undefined && cfg.apiKey.length > 0,
-        keySource: cfg.apiKey !== undefined && cfg.apiKey.length > 0 ? 'config' : 'env',
-        // null = 设置服务不落盘（面板保存后据此警告"重启丢失"）。
-        persistPath: settingsPersistPath(),
-        // 当日成本（进程内记账）与限额（0 = 不限）；限额读活配置（与执行同源）。
-        costTodayUsd: jev.costTodayUsd(),
-        dailyCostLimitUsd: resolveSettings(configOverride ?? config).dailyCostLimitUsd,
-        // 预批准名单（面板可管理，热生效）。
-        preapproveAllowlist: [...resolveSettings(configOverride ?? config).preapproveToolAllowlist].sort(),
-        guardEnabled: settings.guardEnabled,
-        preapproveEnabled: settings.preapproveEnabled,
-        stagnationEnabled: settings.stagnationEnabled,
-      }
-    },
-    getStats: () => telemetry.statsData(500),
-    // 校准基线用与四个挂点同一份 settings 快照：报告的「当前值」= 实际执行值。
-    // 每次生成都会与上一份快照对比（采纳/忽略/桶变化）并落一份新快照。
-    getCalibration: async (): Promise<CalibrationReport> => (await buildCalibration(false)).report,
-    // 面板每 20s 自动刷新会打这个端点：尾部窗口而非全量（/jev-impact 命令才是全量）。
-    getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
-    testConnection: (apiKeyOverride) => jev.ping(apiKeyOverride === undefined ? {} : { apiKeyOverride }),
-    getLog: (limit) => telemetry.recentEntries(limit),
-    getReadiness: async (): Promise<ShadowReadiness> => assessReadiness(await telemetry.entries(2000)),
-    updateConfig: async (patch): Promise<{ rejected: string[] }> => {
-      const rejected: string[] = []
-      // 先立即更新内存（getStatus 立刻能看到，无论 settings 服务是否存在）
-      if (typeof patch['enabled'] === 'boolean') liveOverride = { ...live(), enabled: patch['enabled'] }
-      if (patch['mode'] === 'shadow' || patch['mode'] === 'enforce') liveOverride = { ...live(), mode: patch['mode'] }
-      if (typeof patch['provider'] === 'string') configOverride = { ...(configOverride ?? config), provider: patch['provider'] as Config['provider'] }
-      if (typeof patch['endpoint'] === 'string') configOverride = { ...(configOverride ?? config), endpoint: patch['endpoint'] }
-      if (typeof patch['apiKey'] === 'string') configOverride = { ...(configOverride ?? config), apiKey: patch['apiKey'] }
-      // 阈值字段（校准建议一键应用）：写进活配置，挂点 getter 下一个调用即生效。
-      // 非法值（非数字/越界）如实拒绝——绝不静默 200 假装成功。
-      for (const key of CALIBRATABLE_KEYS) {
-        if (!Object.hasOwn(patch, key)) continue
-        const value = patch[key]
-        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
-          rejected.push(key)
-          continue
-        }
-        configOverride = { ...(configOverride ?? config), [key]: value as never }
-      }
-      // 预批准名单（面板管理）：非空字符串数组校验后整组替换（热生效）。
-      if (Array.isArray(patch['preapproveToolAllowlist'])) {
-        const list = patch['preapproveToolAllowlist'] as unknown[]
-        if (list.every(item => typeof item === 'string' && item.length > 0)) {
-          configOverride = { ...(configOverride ?? config), preapproveToolAllowlist: list as string[] }
-        } else {
-          rejected.push('preapproveToolAllowlist')
-        }
-      }
-      if (rejected.length > 0) {
-        ctx.logger.warn(`dsh-jev-interceptor: rejected out-of-range config values: ${rejected.join(', ')}`)
-        return { rejected }
-      }
-      // 再尽力持久化（失败不影响本次运行）
-      try {
-        const settingsService = ctx.get('settings')
-        if (settingsService !== undefined && typeof settingsService.update === 'function') {
-          await settingsService.update(SETTINGS_NS, patch)
-        }
-      } catch { /* 内存已更新，持久化失败仅影响重启后 */ }
-      return { rejected }
-    },
-  })
+    registerJevApi(ctx, {
+      getStatus,
+      getStats: () => telemetry.statsData(500),
+      getCalibration: async (model): Promise<CalibrationReport> => (await buildCalibration(false, model)).report,
+      // The dashboard polls the tail window. /jev-impact keeps the full active log.
+      getImpact: async (): Promise<ImpactSummary> => summarizeImpact(await telemetry.entries(5000)),
+      testConnection: (apiKeyOverride, signal) => {
+        syncConnection()
+        return jev.ping({ apiKeyOverride, signal })
+      },
+      getLog: (limit) => telemetry.recentEntries(limit),
+      getReadiness: async (): Promise<ShadowReadiness> => {
+        const window = await telemetry.entries(2000)
+        const model = activeCalibrationModel()
+        const requestModel = route?.model
+        if (model === null) return { shadowSamples: 0, misApprovals: 0, degradedRate: 0, ready: false, reason: '先测试连接，确认当前模型版本。' }
+        const { entries } = calibrationWindow(window, model)
+        const failures = window.filter(entry => requestModel !== undefined && entry.requestModel === requestModel
+          && (entry.tag === 'guard' || entry.tag === 'preapprove') && entry.action === 'degraded')
+        return assessReadiness([...entries, ...failures])
+      },
+      updateConfig,
+    })
   })
 
   // Optional seams resolved defensively: the plugin loads in every profile.
@@ -361,7 +487,7 @@ export function apply(ctx: Context, config: Config): void {
       // 每事件从活配置读取：面板/命令应用新阈值后下一个调用即生效
       // （resolveSettings 只在 Jev 分类成功后调用一次，分配成本可忽略）。
       thresholds: () => {
-        const t = thresholdsOf(resolveSettings(configOverride ?? config))
+        const t = thresholdsOf(resolveSettings(activeConfig()))
         return {
           confidenceMin: t.guardConfidenceMin,
           denyConfidence: t.guardDenyConfidence,
@@ -388,9 +514,9 @@ export function apply(ctx: Context, config: Config): void {
 
   if (settings.preapproveEnabled) {
     ctx.on('approval/request', createPreapproveListener({
-      allowlist: () => new Set(resolveSettings(configOverride ?? config).preapproveToolAllowlist),
+      allowlist: () => resolveSettings(activeConfig()).preapproveToolAllowlist,
       thresholds: () => {
-        const t = thresholdsOf(resolveSettings(configOverride ?? config))
+        const t = thresholdsOf(resolveSettings(activeConfig()))
         return {
           autoApproveMin: t.preapproveAutoApproveMin,
           irreversibleMax: t.preapproveIrreversibleMax,
@@ -457,32 +583,13 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('session/event', createApprovalLoopListener({ trace: approvalTrace, telemetry, live }))
 
   const setLive = async (patch: Partial<LiveSettings>): Promise<CommandResult> => {
-    // Apply immediately in-process so behavior flips on the next event even
-    // when persistence (or the reload it triggers) is unavailable.
-    liveOverride = { ...live(), ...patch }
-    const settingsService = ctx.get('settings')
-    if (settingsService !== undefined && typeof settingsService.update === 'function') {
-      try {
-        await settingsService.update(SETTINGS_NS, patch)
-        const now = live()
-        const persistPath = settingsPersistPath()
-        const persistenceNote = persistPath !== null
-          ? `已持久化到 ${persistPath}`
-          : '⚠ 当前组合的设置服务不落盘——重启后丢失；要永久生效请写入 cordis.patch.yml 的 jev-interceptor 行'
-        return {
-          kind: 'success',
-          text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode}。`
-            + ` ${persistenceNote} 下一个工具调用即生效（无需重启）。`,
-        }
-      } catch (error: unknown) {
-        ctx.logger.warn(`dsh-jev-interceptor: settings update failed (${error instanceof Error ? error.message : String(error)}); applied in-memory only for this run`)
-      }
-    }
+    const result = await updateConfig(patch)
+    if ('error' in result) return { kind: 'error', text: result.error }
     const now = live()
     return {
       kind: 'success',
-      text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode} —— 仅本次运行生效。`
-        + ' 当前 profile 无法持久化插件设置；要永久生效请在 cordis.patch.yml 的 jev-interceptor 行设置 enabled/mode。',
+      text: `dsh-jev-interceptor：已${now.enabled ? '启用' : '停用'}，模式 ${now.mode}。`
+        + (result.persisted ? ' 已保存到当前 profile。' : ' 仅本次运行生效，可写入 cordis.patch.yml 保留。'),
     }
   }
 
@@ -503,11 +610,16 @@ export function apply(ctx: Context, config: Config): void {
     void commandsCtx.commands.register({
       definitionId: jevCalibrateDefinitionId,
       name: 'jev-calibrate',
-      description: '分析影子遥测，输出阈值调整建议（默认最近 2000 条，--all 全量）',
-      input: { hint: '[--all]' },
+      description: '按模型版本分析遥测，输出阈值建议',
+      input: { hint: '[--all] [--model <id>]' },
       handler: async (invocation): Promise<CommandResult> => {
-        const full = invocation.rawInput.includes('--all')
-        const { report, extras } = await buildCalibration(full)
+        const tokens = invocation.rawInput.trim().split(/\s+/).filter(Boolean)
+        const modelIdx = tokens.indexOf('--model')
+        const model = modelIdx < 0 ? undefined : tokens[modelIdx + 1]
+        if (modelIdx >= 0 && (model === undefined || model.startsWith('--'))) {
+          return { kind: 'error', text: '用法：/jev-calibrate [--all] [--model <id>]' }
+        }
+        const { report, extras } = await buildCalibration(tokens.includes('--all'), model)
         return { kind: 'success', text: renderCalibration(report, extras) }
       },
     })
@@ -527,11 +639,14 @@ export function apply(ctx: Context, config: Config): void {
       input: { hint: '[add <tool> | remove <tool>]' },
       handler: async (invocation): Promise<CommandResult> => {
         const tokens = invocation.rawInput.trim().split(/\s+/).filter(t => t.length > 0)
-        const readList = (): string[] => [...resolveSettings(configOverride ?? config).preapproveToolAllowlist].sort()
+        const readList = (): string[] => [...resolveSettings(activeConfig()).preapproveToolAllowlist].sort()
         // 无参：显示名单 + 影子建议。
         if (tokens.length === 0) {
           const list = readList()
-          const suggestions = suggestAllowlist(await telemetry.entries(2000)).filter(s => !list.includes(s.tool))
+          const window = await telemetry.entries(2000)
+          const { entries } = calibrationWindow(window, activeCalibrationModel())
+          const eligible = new Set(suggestAllowlist(window).map(item => item.tool))
+          const suggestions = suggestAllowlist(entries).filter(s => !list.includes(s.tool) && eligible.has(s.tool))
           const lines: string[] = ['```', '⚡ 预批准名单（名单内工具经 Jev 双重判断后自动放行）', '']
           lines.push(list.length === 0 ? '  （空——预批准不会自动批任何工具）' : `  ${list.join(' · ')}`)
           if (suggestions.length > 0) {
@@ -561,15 +676,12 @@ export function apply(ctx: Context, config: Config): void {
         if (next.length === current.length && op === 'remove') {
           return { kind: 'error', text: `${tool} 不在预批准名单中（当前：${current.join(' · ') || '空'}）` }
         }
-        // 与面板同路径：热生效（活配置）+ 尽力持久化。
-        configOverride = { ...(configOverride ?? config), preapproveToolAllowlist: next }
-        const settingsService = ctx.get('settings')
-        if (settingsService !== undefined && typeof settingsService.update === 'function') {
-          try { await settingsService.update(SETTINGS_NS, { preapproveToolAllowlist: next }) } catch { /* 内存已生效 */ }
-        }
+        const result = await updateConfig({ preapproveToolAllowlist: next })
+        if ('error' in result) return { kind: 'error', text: result.error }
         return {
           kind: 'success',
-          text: `已${op === 'add' ? '加入' : '移出'} ${tool}（下一个审批请求即生效）。当前名单：${next.join(' · ') || '空'}`,
+          text: `已${op === 'add' ? '加入' : '移出'} ${tool}。当前名单：${next.join(' · ') || '空'}。`
+            + (result.persisted ? '' : ' 仅本次运行生效。'),
         }
       },
     })
@@ -598,20 +710,27 @@ export function apply(ctx: Context, config: Config): void {
       name: 'jev-status',
       description: '查看 Jev 插件当前状态',
       handler: async (): Promise<CommandResult> => {
-        const s = live()
+        const s = await getStatus()
+        const key = s.keyError ?? ({
+          config: '面板或配置文件',
+          credentials: `凭据库（${s.keyReference}）`,
+          env: `环境（${s.keyReference}）`,
+          none: `未找到 ${s.keyReference}（在面板配置 Key，或运行 /jev-key）`,
+        }[s.keySource])
         const text = [
           '```',
           '⚡ dsh-jev-interceptor 状态',
           `  运行   ${s.enabled ? '✅ 已启用' : '⏸️ 已停用'}`,
           `  模式   ${s.mode}${s.mode === 'shadow' ? '（只记录）' : '（执行决策）'}`,
-          `  源     ${config.provider ?? 'typesafe'}`,
-          `  模型   ${model}`,
+          `  源     ${s.provider}${s.endpointOrigin ? ` · ${s.endpointOrigin}` : ''}`,
+          `  模型   ${s.model || '未配置'}`,
+          s.connectionError === undefined ? '' : `  连接   ${s.connectionError}`,
           `  守门   ${settings.guardEnabled ? '✅' : '❌'}  预批 ${settings.preapproveEnabled ? '✅' : '❌'}  停滞 ${settings.stagnationEnabled ? '✅' : '❌'}  注入扫描 ${settings.untrustedScanEnabled ? '✅' : '❌'}`,
-          resolveSettings(configOverride ?? config).dailyCostLimitUsd > 0
-            ? `  成本   今日 $${jev.costTodayUsd().toFixed(6)} / 限额 $${resolveSettings(configOverride ?? config).dailyCostLimitUsd.toFixed(2)}${jev.costTodayUsd() >= resolveSettings(configOverride ?? config).dailyCostLimitUsd ? '（已超限，降级中）' : ''}`
+          s.dailyCostLimitUsd > 0
+            ? `  成本   今日 $${s.costTodayUsd.toFixed(6)} / 限额 $${s.dailyCostLimitUsd.toFixed(2)}${s.costTodayUsd >= s.dailyCostLimitUsd ? '（已超限，降级中）' : ''}`
             : '',
-          `  Key    ${config.apiKey !== undefined && config.apiKey.length > 0 ? '✅ 已配置' : (await resolveKey()) !== undefined ? '✅ 环境变量' : '❌ 未配置（运行 /jev-key <key>）'}`,
-          settings.preapproveToolAllowlist.size === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
+          `  Key    ${key}`,
+          (s.preapproveAllowlist ?? []).length === 0 ? '  预批白名单为空，不会自动批任何工具' : '',
           '  控制: /jev-on /jev-off /jev-mode',
           '  统计: /jev-stats │ 明细: /jev-log │ 校准: /jev-calibrate │ 归因: /jev-impact │ 名单: /jev-allowlist',
           '```',
@@ -629,25 +748,13 @@ export function apply(ctx: Context, config: Config): void {
         if (key.length < 10) {
           return { kind: 'error', text: '用法：/jev-key <你的API密钥>（长度需大于 10 个字符）' }
         }
-        const settingsService = ctx.get('settings')
-        if (settingsService !== undefined && typeof settingsService.update === 'function') {
-          try {
-            await settingsService.update(SETTINGS_NS, { apiKey: key })
-            const persistPath = settingsPersistPath()
-            return {
-              kind: 'success',
-              text: persistPath !== null
-                ? `dsh-jev-interceptor：API key 已存储 ✅ 持久化到 ${persistPath}，无需环境变量，重启后仍生效。下一步：/jev-on 启用插件`
-                : 'dsh-jev-interceptor：API key 已存储 ✅（本运行生效）。⚠ 当前组合的设置服务不落盘，重启后丢失——'
-                  + '请把 apiKey 写进 cordis.patch.yml 的 jev-interceptor 行永久生效',
-            }
-          } catch (error: unknown) {
-            ctx.logger.warn(`dsh-jev-interceptor: key storage failed (${error instanceof Error ? error.message : String(error)})`)
-          }
-        }
+        const result = await updateConfig({ apiKey: key })
+        if ('error' in result) return { kind: 'error', text: result.error }
         return {
-          kind: 'error',
-          text: '当前 profile 无法持久化设置。备选方案：在 cordis.patch.yml 的 jev-interceptor 行加 apiKey: <你的key>',
+          kind: 'success',
+          text: result.persisted
+            ? 'API Key 已保存到当前 profile。'
+            : 'API Key 仅在本次运行生效。可在 profile 中配置长期使用的凭据。',
         }
       },
     })
@@ -686,6 +793,6 @@ export function apply(ctx: Context, config: Config): void {
     : ''
   ctx.logger.info(
     `dsh-jev-interceptor：${state.enabled ? `运行中（${state.mode} 模式）` : '已注册但停用'}`
-    + `（provider ${endpoint}，模型 ${model}）；/jev-on 和 /jev-mode 可运行时切换${allowlistNote}`,
+    + `（${route?.provider ?? '连接未配置'}，${route?.model ?? connectionError}）；/jev-on 和 /jev-mode 可运行时切换${allowlistNote}`,
   )
 }

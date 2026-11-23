@@ -16,7 +16,10 @@ npm ci
 npm run typecheck   # src + tests, against real @deepseek-ai package types
 npm test            # vitest, offline, no API key needed
 npm run build       # tsc -> lib/
+npm run preview:ui  # isolated UI preview at http://127.0.0.1:4173
 ```
+
+The UI preview uses fixture data only; it never connects to your running harness, reads credentials, or calls a provider. Its toolbar switches light/dark themes, panel widths down to 320px, and empty/error states. Changes made through the preview affect its in-memory fixtures only. `npm run typecheck` also checks the panel's React components.
 
 Optional live checks (cost cents, need a key):
 

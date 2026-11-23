@@ -5,10 +5,10 @@ import { describe, expect, it } from 'vitest'
 import { JevClient, type ClassifyCall } from '../src/jev.js'
 import { Telemetry } from '../src/telemetry.js'
 
-function okBody(): Response {
+function okBody(question = 'is_urgent', model = 'jev-1.13.0'): Response {
   return new Response(JSON.stringify({
-    model: 'jev-1.13.0',
-    answers: { is_urgent: { type: 'noul', noul: 0.95 } },
+    model,
+    answers: { [question]: { type: 'noul', noul: 0.95 } },
     usage: { input_tokens: 300, output_tokens: 20 },
   }), { status: 200 })
 }
@@ -108,6 +108,12 @@ describe('JevClient', () => {
     expect(await client.classify(call)).toBeNull()
   })
 
+  it('rejects a valid typed response to the wrong question', async () => {
+    const { client } = await makeClient(async () => okBody('other'))
+    expect(await client.classify(call)).toBeNull()
+    expect(await client.ping()).toMatchObject({ ok: false, error: 'invalid-response' })
+  })
+
   it('throttles repeated same-reason degrade telemetry to one row per minute', async () => {
     const entries: { action: import('../src/telemetry.js').DecisionAction; detail?: string }[] = []
     const telemetry = { record: (entry: { action: import('../src/telemetry.js').DecisionAction; detail?: string }) => { entries.push(entry) } }
@@ -147,7 +153,7 @@ describe('JevClient', () => {
 
 describe('ping', () => {
   it('reports success with the provider model', async () => {
-    const { client } = await makeClient(async () => okBody())
+    const { client } = await makeClient(async () => okBody('ping'))
     const result = await client.ping()
     expect(result.ok).toBe(true)
     expect(result.model).toBe('jev-1.13.0')
@@ -163,7 +169,7 @@ describe('ping', () => {
     expect((await server.client.ping()).error).toBe('server')
   })
 
-  it('treats 429 as a valid key (rate-limited success)', async () => {
+  it('reports a reachable but rate-limited endpoint', async () => {
     const { client } = await makeClient(async () => new Response('slow down', { status: 429 }))
     const result = await client.ping()
     expect(result.ok).toBe(true)
@@ -181,11 +187,30 @@ describe('ping', () => {
     let seenAuthorization = ''
     const { client } = await makeClient(async (_input, init) => {
       seenAuthorization = String((init?.headers as Record<string, string>)['authorization'])
-      return okBody()
+      return okBody('ping')
     })
     const result = await client.ping({ apiKeyOverride: 'draft-key-12345' })
     expect(result.ok).toBe(true)
     expect(seenAuthorization).toBe('Bearer draft-key-12345')
+  })
+
+  it('expires alias decisions when the active key observes a new version', async () => {
+    let version = 'jev-1.13.0'
+    const { client } = await makeClient(async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> }
+      return okBody(Object.hasOwn(request.questions, 'ping') ? 'ping' : 'is_urgent', version)
+    })
+    expect(await client.classify(call)).toMatchObject({ model: version, modelReported: true, cached: false })
+    expect(await client.classify(call)).toMatchObject({ cached: true })
+
+    version = 'jev-1.14.0'
+    expect(await client.ping({ apiKeyOverride: 'draft-key-12345' })).toMatchObject({ ok: true, model: version })
+    expect(client.reportedModel()).toBe('jev-1.13.0')
+    expect(await client.classify(call)).toMatchObject({ model: 'jev-1.13.0', cached: true })
+
+    expect(await client.ping()).toMatchObject({ ok: true, model: version })
+    expect(client.reportedModel()).toBe(version)
+    expect(await client.classify(call)).toMatchObject({ model: version, cached: false })
   })
 
   it('reports no-key without touching the network', async () => {
@@ -203,6 +228,47 @@ describe('ping', () => {
       logger: { warn: () => {} },
     })
     expect(await client.ping()).toEqual({ ok: false, latencyMs: 0, error: 'no-key' })
+  })
+})
+
+describe('live connection', () => {
+  it('drops previous answers and retains spend across route changes', async () => {
+    const requests: string[] = []
+    const { client } = await makeClient(async (input) => {
+      requests.push(String(input))
+      return okBody()
+    })
+    expect((await client.classify(call))?.cached).toBe(false)
+    expect((await client.classify(call))?.cached).toBe(true)
+    const firstSpend = client.costTodayUsd()
+    client.setConnection({
+      endpoint: 'https://new.example.test/systemone',
+      model: 'jev-latest',
+      timeoutMs: 1500,
+      resolveKey: async () => 'another-test-key',
+    })
+    expect((await client.classify(call))?.cached).toBe(false)
+    expect(client.costTodayUsd()).toBeCloseTo(firstSpend * 2)
+    expect(requests).toEqual(['https://example.test/decisions', 'https://new.example.test/systemone'])
+  })
+
+  it('discards an old in-flight answer after switching connections', async () => {
+    let release!: () => void
+    const paused = new Promise<void>(resolve => { release = resolve })
+    let started!: () => void
+    const inFlight = new Promise<void>(resolve => { started = resolve })
+    const { client } = await makeClient(async () => {
+      started()
+      await paused
+      return okBody()
+    })
+    const original = client.classify(call)
+    await inFlight
+    client.setConnection(undefined)
+    release()
+    expect(await original).toBeNull()
+    expect(await client.ping()).toMatchObject({ ok: false, error: 'invalid-connection' })
+    expect(client.costTodayUsd()).toBeGreaterThan(0)
   })
 })
 

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "noEmit": true
+  },
+  "include": ["src/client/**/*.tsx", "src/client/panel-css.ts", "src/client/view-model.ts"],
+  "exclude": []
+}

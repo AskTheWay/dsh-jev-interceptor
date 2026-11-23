@@ -101,17 +101,18 @@ export function createPreapproveListener(
     if (req.reason !== undefined && req.reason.startsWith('jev-guard:')) return next()
     if (!deps.allowlist().has(req.toolName)) return next()
 
-    let verdict: PreapproveVerdict | undefined
+    let evaluation: { verdict: PreapproveVerdict; model?: string } | undefined
     try {
-      verdict = await evaluatePreapprove(deps, live, req)
+      evaluation = await evaluatePreapprove(deps, live, req)
     } catch {
       // Our own failure must land on the human answerer; next() errors are not ours to swallow.
-      verdict = undefined
     }
+    const verdict = evaluation?.verdict
     deps.trace?.noteVerdict(
       req.agent.session.id,
       req.callId === undefined ? undefined : String(req.callId),
       verdict === undefined ? 'not-evaluated' : verdict.kind,
+      { mode: live.mode, model: evaluation?.model },
     )
     if (verdict === undefined) return next()
     if (live.mode === 'enforce' && verdict.kind === 'auto-approve') return 'allowed-once'
@@ -128,7 +129,7 @@ async function evaluatePreapprove(
   deps: PreapproveDeps,
   live: LiveSettings,
   req: ApprovalRequestEvent,
-): Promise<PreapproveVerdict | undefined> {
+): Promise<{ verdict: PreapproveVerdict; model?: string } | undefined> {
   const session = req.agent.session
   // Without captured arguments the only grant evidence left is the model's
   // own ask reason; judge that for a human, never for an auto-approval.
@@ -171,6 +172,7 @@ async function evaluatePreapprove(
     return undefined
   }
   const verdict = decidePreapprove(extracted, deps.thresholds())
+  const model = result.modelReported === false ? undefined : result.model
   deps.telemetry.record({
     ts: new Date().toISOString(),
     tag: 'preapprove',
@@ -178,7 +180,7 @@ async function evaluatePreapprove(
     tool: req.toolName,
     sessionId: session.id,
     callId: req.callId === undefined ? undefined : String(req.callId),
-    model: result.model,
+    ...(model === undefined ? {} : { model }),
     action: verdict.kind === 'auto-approve' ? 'auto-approve' : 'human',
     detail: `scope=${extracted.withinGrantedScope.noul.toFixed(2)} reversible=${extracted.reversible.noul.toFixed(2)}`
       + ` inj=${extracted.injectionSuspect.noul.toFixed(2)}`
@@ -194,5 +196,5 @@ async function evaluatePreapprove(
       inj: extracted.injectionSuspect.noul,
     },
   })
-  return verdict
+  return { verdict, model }
 }

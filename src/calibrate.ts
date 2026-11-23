@@ -92,10 +92,20 @@ export interface CalibrationNote {
   readonly reason: string
 }
 
+export interface CalibrationScope {
+  /** Exact provider response ID used in this report. */
+  readonly model: string | null
+  readonly currentModel: string | null
+  /** All guard, preapproval and agreement rows scanned, including unversioned rows. */
+  readonly scanned: number
+  readonly models: readonly { readonly model: string; readonly samples: number }[]
+}
+
 /** 一份校准报告；renderCalibration 渲染为中文文本。 */
 export interface CalibrationReport {
   /** 分析窗口内的记录总数。 */
   readonly windowSize: number
+  readonly scope?: CalibrationScope
   readonly counts: { readonly guard: number; readonly preapprove: number; readonly approvalLoop: number }
   /** 窗口内三类决策记录的 shadow/enforce 分布。 */
   readonly modeSplit: { readonly shadow: number; readonly enforce: number }
@@ -466,11 +476,11 @@ export function assessReadiness(entries: readonly TelemetryEntry[]): ShadowReadi
   }
   const degradedRate = shadow > 0 ? degraded / shadow : 0
   const reasons: string[] = []
-  if (shadow < READINESS_MIN_SAMPLES) reasons.push(`影子样本 ${String(shadow)} 条（< ${String(READINESS_MIN_SAMPLES)}）`)
+  if (shadow - degraded < READINESS_MIN_SAMPLES) reasons.push(`有效观察样本 ${String(shadow - degraded)} 条（< ${String(READINESS_MIN_SAMPLES)}）`)
   if (misApprovals > 0) reasons.push(`影子期出现 ${String(misApprovals)} 次「Jev 会批、人拒绝」`)
   if (degradedRate > READINESS_MAX_DEGRADED_RATE) reasons.push(`降级率 ${(degradedRate * 100).toFixed(0)}%（> 30%）`)
   return {
-    shadowSamples: shadow,
+    shadowSamples: shadow - degraded,
     misApprovals,
     degradedRate,
     ready: reasons.length === 0 && shadow > 0,
@@ -478,6 +488,32 @@ export function assessReadiness(entries: readonly TelemetryEntry[]): ShadowReadi
       ? '影子数据健康：零误批倾向、降级率正常，建议切到执行模式'
       : `继续观察：${reasons.join('；')}`,
   }
+}
+
+/** Recognize disclosed model IDs without treating rolling or automatic selections as versions. */
+export function isCalibrationModel(model: unknown): model is string {
+  return typeof model === 'string' && model.trim() !== '' && !/(?:^|[/_:-])(?:latest|auto|default)$/i.test(model.trim())
+}
+
+/** Select exact model matches for replay and leave unversioned records visible in the log. */
+export function calibrationWindow(
+  entries: readonly TelemetryEntry[],
+  currentModel: string | null,
+  model = currentModel,
+): { scope: CalibrationScope; entries: TelemetryEntry[] } {
+  const counts = new Map<string, number>()
+  const selected: TelemetryEntry[] = []
+  let scanned = 0
+  for (const entry of entries) {
+    if (entry.tag !== 'guard' && entry.tag !== 'preapprove' && entry.tag !== 'approval-loop') continue
+    scanned += 1
+    if (entry.action === 'degraded' || !isCalibrationModel(entry.model)) continue
+    counts.set(entry.model, (counts.get(entry.model) ?? 0) + 1)
+    if (entry.model === model) selected.push(entry)
+  }
+  const models = [...counts].map(([model, samples]) => ({ model, samples }))
+    .sort((left, right) => right.samples - left.samples || left.model.localeCompare(right.model))
+  return { scope: { model, currentModel, scanned, models }, entries: selected }
 }
 
 // ── 主分析 ───────────────────────────────────────────────────────────────
@@ -725,6 +761,12 @@ const PARAM_LABELS: Readonly<Record<string, string>> = {
 export function renderCalibration(report: CalibrationReport, extras: readonly string[] = []): string {
   const lines: string[] = ['```']
   lines.push('🎯 dsh-jev-interceptor 阈值校准')
+  if (report.scope !== undefined) {
+    const { model, currentModel, scanned, models } = report.scope
+    lines.push(`模型 ${model ?? '待连接测试确认'} · 纳入 ${report.windowSize}/${scanned} 条决策与一致率记录`)
+    if (model !== null && model !== currentModel) lines.push('所选模型为历史版本，建议仅供查看。')
+    if (models.length > 0) lines.push(`日志中的版本：${models.map(item => `${item.model}（${item.samples}）`).join('、')}`)
+  }
   lines.push('')
   lines.push(`窗口 ${report.windowSize} 条（guard ${report.counts.guard} │ preapprove ${report.counts.preapprove} │ 一致率 ${report.counts.approvalLoop}）`
     + ` 模式 shadow ${report.modeSplit.shadow} / enforce ${report.modeSplit.enforce}`)

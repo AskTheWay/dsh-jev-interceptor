@@ -77,13 +77,14 @@ describe('createApprovalLoopListener', () => {
     const session = fakeSession('s1') as never
 
     listener(session, { type: 'approval/asked', data: { id: 'a1', toolName: 'bash', callId: 'c1' } } as never)
-    trace.noteVerdict('s1', 'c1', 'auto-approve')
+    trace.noteVerdict('s1', 'c1', 'auto-approve', { mode: 'shadow', model: 'jev-1.14.0' })
     listener(session, { type: 'approval/decided', data: { id: 'a1', outcome: 'rejected' } } as never)
 
     expect(telemetry.entries.length).toBe(1)
     const entry = telemetry.entries[0]
     expect(entry.tag).toBe('approval-loop')
     expect(entry.action).toBe('agreement')
+    expect(entry).toMatchObject({ mode: 'shadow', model: 'jev-1.14.0', callId: 'c1' })
     expect(entry.detail).toContain('would-over-approve')
     expect(entry.detail).toContain('jev=auto-approve')
     expect(entry.detail).toContain('human=rejected')

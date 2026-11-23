@@ -10,25 +10,15 @@
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import type { CalibrationReport, ThresholdKey, ThresholdsInput } from './calibrate.js'
-
-/** 可比对的阈值参数（与 ThresholdsInput 同键）。 */
-const THRESHOLD_KEYS: readonly ThresholdKey[] = [
-  'guardConfidenceMin',
-  'guardDenyConfidence',
-  'guardIrreversibleCeiling',
-  'guardIrreversibleDenyFloor',
-  'guardInjectionAskThreshold',
-  'preapproveAutoApproveMin',
-  'preapproveIrreversibleMax',
-  'preapproveInjectionSuspectMax',
-]
+import { THRESHOLD_KEYS, type CalibrationReport, type ThresholdKey, type ThresholdsInput } from './calibrate.js'
 
 /** 一份持久化的校准快照（JSONL 一行）。 */
 export interface CalibrationSnapshot {
   /** 快照时间（ISO）。 */
   readonly ts: string
   readonly windowSize: number
+  /** Response model identity, absent on snapshots from older builds. */
+  readonly model?: string
   /** 当时生效的阈值（采纳判断的基准）。 */
   readonly thresholds: Readonly<Record<string, number>>
   /** 当时的建议（param → suggested）。 */
@@ -54,6 +44,7 @@ export function snapshotOf(
   return {
     ts: now,
     windowSize: report.windowSize,
+    ...(report.scope?.model == null ? {} : { model: report.scope.model }),
     thresholds: thresholdsRecord(current),
     advice: report.advice.map(a => ({ param: a.param, current: a.current, suggested: a.suggested })),
     buckets: { ...buckets },
@@ -94,7 +85,8 @@ export class CalibrationHistory {
    * 读取最近的快照（旧→新）。文件不存在或不可读返回空。
    * @param limit - 最多返回几份（默认 10）。
    */
-  async recent(limit = 10): Promise<CalibrationSnapshot[]> {
+  async recent(limit = 10, model?: string): Promise<CalibrationSnapshot[]> {
+    await this.writeQueue
     await this.ready().catch(() => undefined)
     try {
       const raw = await readFile(this.file, 'utf8')
@@ -102,7 +94,8 @@ export class CalibrationHistory {
       for (const line of raw.split('\n')) {
         if (line.length === 0) continue
         try {
-          snapshots.push(JSON.parse(line) as CalibrationSnapshot)
+          const snapshot = JSON.parse(line) as CalibrationSnapshot | null
+          if (snapshot !== null && (model === undefined || snapshot.model === model)) snapshots.push(snapshot)
         } catch {
           // 撕裂行读为缺失。
         }
@@ -193,6 +186,7 @@ const BUCKET_LABELS: Readonly<Record<string, string>> = {
  */
 export function shouldAppend(previous: CalibrationSnapshot | undefined, next: CalibrationSnapshot, debounceMs = 5 * 60_000): boolean {
   if (previous === undefined) return true
+  if (previous.model !== next.model) return true
   const gap = Date.parse(next.ts) - Date.parse(previous.ts)
   if (!Number.isFinite(gap) || gap >= debounceMs) return true
   return JSON.stringify(previous.advice) !== JSON.stringify(next.advice)

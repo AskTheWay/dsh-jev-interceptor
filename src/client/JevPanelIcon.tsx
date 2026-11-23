@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useState } from 'react'
+import { Icon } from './Icons.js'
 
 /** 侧栏图标 owner props 的本地镜像（上游 SidebarPanelIconOwnerProps）。 */
 interface PanelIconProps {
@@ -41,11 +42,11 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
           fetch('/api/jev-interceptor/stats', { headers: { 'cache-control': 'no-store' } }),
         ])
         if (!sr.ok || !tr.ok) return
-        const s = await sr.json() as { enabled: boolean; mode: 'shadow' | 'enforce' }
+        const s = (await sr.json()) as { enabled: boolean; mode: 'shadow' | 'enforce' }
         const stats = await tr.json()
         let degraded = 0
         let calls = 0
-        for (const t of Array.isArray(stats) ? stats as Array<{ degraded?: number; calls?: number }> : []) {
+        for (const t of Array.isArray(stats) ? (stats as Array<{ degraded?: number; calls?: number }>) : []) {
           degraded += t.degraded ?? 0
           calls += t.calls ?? 0
         }
@@ -55,7 +56,9 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
       }
     }
     void pull()
-    const timer = setInterval(() => { void pull() }, POLL_MS)
+    const timer = setInterval(() => {
+      void pull()
+    }, POLL_MS)
     return () => {
       cancelled = true
       clearInterval(timer)
@@ -63,47 +66,57 @@ export function JevPanelIcon({ size = 18, active = false }: PanelIconProps): Rea
   }, [])
 
   // 状态点走官方主题变量：深色/浅色主题下都能与背景环形成对比。
-  const dot = badge === null
-    ? undefined
-    : !badge.enabled ? 'var(--dsw-alias-label-secondary,#8a8a8a)'
-      : badge.degraded > 0 ? 'var(--dsw-alias-state-warn-primary,#d97706)'
-        : 'var(--dsw-alias-state-success-primary,#16a34a)'
-  const title = badge === null ? 'Jev 决策'
-    : 'Jev 决策 · '
-      + (badge.enabled
-        ? (badge.mode === 'shadow' ? '运行中（观察）' : '运行中（执行）')
-        : '已停用')
-      + ` · 统计窗口 ${String(badge.calls)} 次决策`
-      + (badge.degraded > 0 ? ` · ${String(badge.degraded)} 次降级` : '')
+  const dot =
+    badge === null
+      ? undefined
+      : !badge.enabled
+        ? 'var(--dsw-alias-label-secondary,#8a8a8a)'
+        : badge.degraded > 0
+          ? 'var(--dsw-alias-state-warn-primary,#d97706)'
+          : 'var(--dsw-alias-state-success-primary,#16a34a)'
+  const title =
+    badge === null
+      ? 'Jev 决策'
+      : 'Jev 决策 · ' +
+        (badge.enabled ? (badge.mode === 'shadow' ? '运行中（观察）' : '运行中（执行）') : '已停用') +
+        ` · 统计窗口 ${String(badge.calls)} 次决策` +
+        (badge.degraded > 0 ? ` · ${String(badge.degraded)} 次降级` : '')
   const dotSize = Math.max(6, Math.round(size * 0.33))
 
   return (
-    <span title={title} style={{
-      position: 'relative',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      width: size,
-      height: size,
-    }}>
-      <span style={{
-        fontSize: Math.round(size * 0.72),
-        lineHeight: '1',
-        // 停用或未选中时整体降饱和，让状态点成为唯一强信号。
-        opacity: badge !== null && !badge.enabled ? 0.45 : active ? 1 : 0.8,
-        filter: active ? 'none' : 'grayscale(30%)',
-      }}>⚡</span>
+    <span
+      title={title}
+      style={{
+        position: 'relative',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: size,
+        height: size,
+      }}
+    >
+      <span
+        style={{
+          display: 'inline-flex',
+          color: active ? 'var(--dsw-alias-brand-primary,#4274c9)' : 'currentColor',
+          opacity: badge !== null && !badge.enabled ? 0.45 : active ? 1 : 0.8,
+        }}
+      >
+        <Icon name="bolt" size={size} />
+      </span>
       {dot !== undefined && (
-        <span style={{
-          position: 'absolute',
-          top: -1,
-          right: -1,
-          width: dotSize,
-          height: dotSize,
-          borderRadius: '50%',
-          background: dot,
-          boxShadow: '0 0 0 1.5px var(--dsw-alias-bg-base,#000)',
-        }} />
+        <span
+          style={{
+            position: 'absolute',
+            top: -1,
+            right: -1,
+            width: dotSize,
+            height: dotSize,
+            borderRadius: '50%',
+            background: dot,
+            boxShadow: '0 0 0 1.5px var(--dsw-alias-bg-base,#000)',
+          }}
+        />
       )}
     </span>
   )

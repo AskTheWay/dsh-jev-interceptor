@@ -306,7 +306,7 @@ async function evaluateGuard(deps: GuardDeps, live: LiveSettings, exec: ToolExec
     tool: exec.name,
     sessionId: session.id,
     callId: exec.callId,
-    model: answers.model,
+    ...(answers.modelReported === false ? {} : { model: answers.model }),
     action: action.kind,
     detail: answerDetail(extracted),
     latencyMs: answers.latencyMs,

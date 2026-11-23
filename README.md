@@ -74,7 +74,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 /jev-stats              # watch what it decides, with full probability distributions
 /jev-log 20 --json      # the last N decisions, one per line; --json/--csv export
 /jev-impact             # the bottom line: clicks saved, denials, cost, latency
-/jev-calibrate          # shadow-data threshold advice — apply with one click
+/jev-calibrate          # thresholds for the current model, review in the panel
+/jev-calibrate --model jev-1.13.0  # replay an older model
 /jev-allowlist          # pre-approve allowlist: view suggestions, add/remove tools
 /jev-mode enforce       # promote once the numbers look right
 /jev-off                # back to stock behavior
@@ -99,7 +100,7 @@ Six weeks of dogfooding (2026-09-22 → 11-07, 19 active days, 10 sessions, 310 
 - total decision cost: **$0.0090** (214,323 input tokens across 180 billed decisions)
 - 129 decisions degraded to stock behavior at **zero behavioral cost** — the fail-closed posture doing exactly what it promises
 
-Calibration closes its own loop: every `/jev-calibrate` run snapshots the report; the next run tells you which of its previous suggestions you adopted (`✓ 已采纳`), ignored, or manually overrode (`↔`), and how the agreement buckets moved since.
+Calibration uses samples from the current model and saves report snapshots for comparisons with the same model. The next report shows which recommendations you adopted and how agreement changed. Replay older models in the Calibration tab or with `/jev-calibrate --model <id>`. Records without a model version remain visible in the log.
 
 ## Safety model (the part you should actually read)
 
@@ -144,14 +145,14 @@ Semantic session retention lives on its own row (disabled and byte-for-byte stoc
     apiKeyEnv: OPENROUTER_API_KEY
 ```
 
-OpenRouter works today with no waitlist (decisions models live on a dedicated endpoint there):
+The OpenRouter preset uses the [System One endpoint](https://openrouter.ai/docs/api/api-reference/systemone/submit-a-system-one-request), pins Jev 1.14, and reads `OPENROUTER_API_KEY` by default. TypeSafe uses `TYPESAFE_API_KEY`. Set `endpoint`, `model`, or `apiKeyEnv` explicitly to override a preset.
 
 ```yaml
     provider: openrouter
     apiKeyEnv: OPENROUTER_API_KEY
 ```
 
-The client speaks the plain `state + questions` wire shape shared by TypeSafe direct, OpenRouter, and the Apache-2.0 local alternative [Laya](https://huggingface.co/convaiinnovations/laya) — providers stay swappable, and a closed provider never becomes a lock-in.
+In the Jev panel, choose a provider, save the connection, and test it. A provider or origin change uses the new credential reference and clears any API key previously saved in the panel. Enter the corresponding key for the new connection if needed. A custom connection takes a full HTTP(S) endpoint, model ID, and credential reference. Configure session reference separately under `jev-session-reference`.
 
 ## Development
 
@@ -164,6 +165,8 @@ node scripts/smoke.mjs           # one real decision against a live provider
 ```
 
 ## Roadmap
+
+See the [System-1 landscape and validation priorities](docs/jev-usage-points.md#november-2026-ecosystem-and-validation-priorities) for current integrations, comparison models, and candidates to validate on this plugin.
 
 The approval loop (v0.1), semantic session retention (v0.2), image-offload pre-planning (v0.4), and stagnation detection (v0.5) are in. The verified next frontiers — where selection, not just safety, meets System-1 ([full catalog](docs/jev-usage-points.md)):
 

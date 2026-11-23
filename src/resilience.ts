@@ -192,4 +192,9 @@ export class LruCache<K, V> {
   get size(): number {
     return this.entries.size
   }
+
+  /** Discard all cached entries. */
+  clear(): void {
+    this.entries.clear()
+  }
 }

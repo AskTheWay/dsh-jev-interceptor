@@ -23,6 +23,8 @@ export interface ClassifyResult {
   readonly answers: JevAnswers
   /** Model version reported by the provider (pin-aware logging). */
   readonly model: string
+  /** False when the response omitted its model and this field is the request ID. */
+  readonly modelReported?: boolean
   readonly latencyMs: number
   readonly inputTokens: number | undefined
   readonly costUsd: number | undefined
@@ -32,6 +34,9 @@ export interface ClassifyResult {
 /** Why one call degraded. */
 export type DegradeReason =
   | 'no-key'
+  | 'credential-unavailable'
+  | 'invalid-connection'
+  | 'connection-changed'
   | 'cooldown'
   | 'cost-limit'
   | 'aborted'
@@ -39,24 +44,36 @@ export type DegradeReason =
   | 'http-error'
   | 'invalid-response'
 
-/** Constructor dependencies; everything ambient is injected for tests. */
-export interface JevClientOptions {
+/** The connection a request uses from credential resolution through response. */
+export interface JevConnection {
   readonly endpoint: string
   readonly model: string
   readonly timeoutMs: number
+  readonly resolveKey: () => Promise<string | undefined>
+}
+
+interface JevClientLimits {
   readonly cooldownMs: number
   readonly failureThreshold: number
   readonly maxConcurrency: number
   readonly cacheSize: number
   /** 每日决策成本限额（USD，本地日界）；缺省 = 不限。getter 形态：与阈值热更新同一模式，改配置即生效。 */
   readonly dailyCostLimitUsd?: () => number
-  /** Resolves the API key per call; `undefined` degrades without counting a failure. */
-  readonly resolveKey: () => Promise<string | undefined>
   readonly telemetry: Telemetry
   /** Minimal logger surface (cordis `ctx.logger` satisfies this). */
   readonly logger: { warn: (message: string) => void }
   readonly fetchFn?: typeof fetch
   readonly now?: Now
+}
+
+/** Constructor dependencies for a client with a fixed connection. */
+export interface JevClientOptions extends JevConnection, JevClientLimits {}
+
+interface ActiveConnection {
+  readonly connection: JevConnection
+  readonly gate: CooldownGate
+  readonly cache: LruCache<string, ClassifyResult>
+  reportedModel?: string
 }
 
 /** One classify call. */
@@ -80,7 +97,7 @@ type RequestOutcome =
   | 'retryable'
   | 'http-error'
   | 'invalid-response'
-  | { answers: JevAnswers; model: string; inputTokens: number | undefined; costUsd: number | undefined }
+  | { answers: JevAnswers; model: string; modelReported: boolean; inputTokens: number | undefined; costUsd: number | undefined }
 
 /** 连接测试的最小预算（毫秒）：决策要快速降级，测试是用户主动等待的操作——给足下限。 */
 const PING_MIN_BUDGET_MS = 5_000
@@ -93,7 +110,7 @@ export interface PingResult {
   readonly model?: string
   /**
    * `no-key` / `network` / `timeout` / `auth`(401/403) / `not-found`(404) /
-   * `rate-limited`(429——key 已通过认证) / `server`(5xx) / `invalid-response`。
+   * `rate-limited` (429 reaches the endpoint) / `server` (5xx) / `invalid-response`.
    */
   readonly error?: string
 }
@@ -102,18 +119,15 @@ export interface PingResult {
  * Bounded Jev caller with cache, cooldown, and concurrency control.
  */
 export class JevClient {
-  private readonly endpoint: string
-  private readonly model: string
-  private readonly timeoutMs: number
+  private active: ActiveConnection | undefined
   private readonly cooldownMs: number
-  private readonly resolveKey: JevClientOptions['resolveKey']
+  private readonly failureThreshold: number
+  private readonly cacheSize: number
   private readonly telemetry: Telemetry
   private readonly logger: JevClientOptions['logger']
   private readonly fetchFn: typeof fetch
   private readonly now: Now
-  private readonly gate: CooldownGate
   private readonly semaphore: Semaphore
-  private readonly cache: LruCache<string, ClassifyResult>
   private readonly dailyCostLimitUsd: () => number
   /**
    * Degrade-telemetry throttle: a session with no key (or an open cooldown)
@@ -131,20 +145,32 @@ export class JevClient {
   /**
    * @param options - endpoints, budgets, key resolution, telemetry, logger.
    */
-  constructor(options: JevClientOptions) {
-    this.endpoint = options.endpoint
-    this.model = options.model
-    this.timeoutMs = options.timeoutMs
+  constructor(options: JevClientOptions | (JevClientLimits & { readonly connection: JevConnection | undefined })) {
     this.cooldownMs = options.cooldownMs
-    this.resolveKey = options.resolveKey
+    this.failureThreshold = options.failureThreshold
+    this.cacheSize = options.cacheSize
     this.telemetry = options.telemetry
     this.logger = options.logger
     this.fetchFn = options.fetchFn ?? fetch
     this.now = options.now ?? Date.now
-    this.gate = new CooldownGate(options.failureThreshold, options.cooldownMs, this.now)
     this.semaphore = new Semaphore(options.maxConcurrency)
-    this.cache = new LruCache(options.cacheSize)
     this.dailyCostLimitUsd = options.dailyCostLimitUsd ?? ((): number => 0)
+    this.setConnection('connection' in options ? options.connection : options)
+  }
+
+  /** Discard old cached answers and cooldown, while retaining shared spend and concurrency. */
+  setConnection(connection: JevConnection | undefined): void {
+    this.lastDegrade = undefined
+    this.active = connection === undefined ? undefined : {
+      connection,
+      gate: new CooldownGate(this.failureThreshold, this.cooldownMs, this.now),
+      cache: new LruCache(this.cacheSize),
+    }
+  }
+
+  /** Most recent version identified by the current provider with its active credentials. */
+  reportedModel(): string | undefined {
+    return this.active?.reportedModel
   }
 
   /** 当日已花（USD，本地日界；进程内记账，重启清零）。 */
@@ -172,12 +198,13 @@ export class JevClient {
    */
   async classify(call: ClassifyCall): Promise<ClassifyResult | null> {
     const started = this.now()
+    const active = this.active
     const degrade = (reason: DegradeReason): null => {
       const previous = this.lastDegrade
-      this.lastDegrade = { reason, at: this.now() }
       const DEGRADE_REPEAT_MS = 60_000
       if (previous !== undefined && previous.reason === reason
         && this.now() - previous.at < DEGRADE_REPEAT_MS) return null
+      this.lastDegrade = { reason, at: this.now() }
       this.telemetry.record({
         ts: new Date().toISOString(),
         tag: call.tag,
@@ -185,6 +212,7 @@ export class JevClient {
         ...(call.tool === undefined ? {} : { tool: call.tool }),
         ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }),
         ...(call.callId === undefined ? {} : { callId: call.callId }),
+        ...(active === undefined ? {} : { requestModel: active.connection.model }),
         action: 'degraded',
         detail: reason,
         ...(reason === 'no-key' || reason === 'cooldown' || reason === 'cost-limit' ? {} : { latencyMs: this.now() - started }),
@@ -192,9 +220,13 @@ export class JevClient {
       return null
     }
 
-    const key = await this.resolveKey()
+    if (active === undefined) return degrade('invalid-connection')
+    const { connection, cache, gate } = active
+    let key: string | undefined
+    try { key = await connection.resolveKey() } catch { return degrade('credential-unavailable') }
+    if (active !== this.active) return degrade('connection-changed')
     if (key === undefined || key.length === 0) return degrade('no-key')
-    if (this.gate.open()) return degrade('cooldown')
+    if (gate.open()) return degrade('cooldown')
     // 每日成本限额：超限即降级（fail-closed），次日自动恢复。
     this.rollCostDay()
     if (this.dailyCostLimitUsd() > 0 && this.costToday.spent >= this.dailyCostLimitUsd()) {
@@ -202,9 +234,9 @@ export class JevClient {
     }
 
     const cacheKey = createHash('sha256')
-      .update(JSON.stringify([this.model, call.state, call.questions]))
+      .update(JSON.stringify([key, call.state, call.questions]))
       .digest('hex')
-    const hit = this.cache.get(cacheKey)
+    const hit = cache.get(cacheKey)
     if (hit !== undefined) {
       // A hit reuses the ANSWERS only: usage and latency belong to the
       // original billable call, so recording them again would multiply the
@@ -212,6 +244,7 @@ export class JevClient {
       return {
         answers: hit.answers,
         model: hit.model,
+        modelReported: hit.modelReported,
         latencyMs: 0,
         inputTokens: undefined,
         costUsd: undefined,
@@ -222,37 +255,46 @@ export class JevClient {
     if (call.signal?.aborted) return degrade('aborted')
     const acquired = await this.semaphore.acquire(
       call.signal ?? new AbortController().signal,
-      this.timeoutMs - (this.now() - started),
+      connection.timeoutMs - (this.now() - started),
     )
     if (acquired !== 'acquired') return degrade(acquired === 'aborted' ? 'aborted' : 'timeout')
     try {
+      if (active !== this.active) return degrade('connection-changed')
+      if (gate.open()) return degrade('cooldown')
       // 排队者获得槽位后复查限额：压缩并发 TOCTOU 窗口（首批在途期间排队
       // 的调用不再照单放行）。finally 保证槽位释放。
       this.rollCostDay()
       if (this.dailyCostLimitUsd() > 0 && this.costToday.spent >= this.dailyCostLimitUsd()) {
         return degrade('cost-limit')
       }
-      const outcome = await this.request(call, key, started)
+      const outcome = await this.request(call, key, started, active)
       if (typeof outcome === 'string') {
+        if (active !== this.active) return degrade('connection-changed')
         if (outcome === 'caller-aborted') return degrade('aborted')
-        if (outcome === 'timeout') this.countFailure('timeout')
-        else this.countFailure(outcome)
+        this.countFailure(gate, outcome)
         return degrade(outcome === 'retryable' ? 'http-error' : outcome)
       }
-      this.gate.onSuccess()
+      // 计费调用记入当日成本：provider 上报值优先、token 估算兜底；
+      // 连 usage 都不报的 provider（自建代理）按请求体规模粗估（~4 字符/token），
+      // 保证限额对无 usage 响应也能生效。
+      this.rollCostDay()
+      this.costToday.spent += outcome.costUsd
+        ?? estimateCostUsd(outcome.inputTokens)
+        ?? estimateCostUsd(Math.max(500, Math.ceil(JSON.stringify([call.state, call.questions]).length / 4)))
+        ?? 0
+      if (active !== this.active) return degrade('connection-changed')
+      gate.onSuccess()
+      if (outcome.modelReported && active.reportedModel !== outcome.model) {
+        // Alias drift invalidates cached results from the previously observed version.
+        cache.clear()
+        active.reportedModel = outcome.model
+      }
       const result: ClassifyResult = {
         ...outcome,
         latencyMs: this.now() - started,
         cached: false,
       }
-      this.cache.set(cacheKey, result)
-      // 计费调用记入当日成本：provider 上报值优先、token 估算兜底；
-      // 连 usage 都不报的 provider（自建代理）按请求体规模粗估（~4 字符/token），
-      // 保证限额对无 usage 响应也能生效。
-      this.costToday.spent += outcome.costUsd
-        ?? estimateCostUsd(outcome.inputTokens)
-        ?? estimateCostUsd(Math.max(500, Math.ceil(JSON.stringify([call.state, call.questions]).length / 4)))
-        ?? 0
+      cache.set(cacheKey, result)
       return result
     } finally {
       this.semaphore.release()
@@ -271,20 +313,27 @@ export class JevClient {
    */
   async ping(options: { apiKeyOverride?: string; signal?: AbortSignal } = {}): Promise<PingResult> {
     const started = this.now()
-    const key = options.apiKeyOverride ?? await this.resolveKey()
+    const active = this.active
+    if (active === undefined) return { ok: false, latencyMs: 0, error: 'invalid-connection' }
+    const { connection } = active
+    let key: string | undefined
+    try { key = options.apiKeyOverride ?? await connection.resolveKey() } catch {
+      return { ok: false, latencyMs: this.now() - started, error: 'credential-unavailable' }
+    }
+    if (active !== this.active) return { ok: false, latencyMs: this.now() - started, error: 'connection-changed' }
     if (key === undefined || key.length === 0) return { ok: false, latencyMs: 0, error: 'no-key' }
-    const timer = AbortSignal.timeout(Math.max(this.timeoutMs, PING_MIN_BUDGET_MS))
+    const timer = AbortSignal.timeout(Math.max(connection.timeoutMs, PING_MIN_BUDGET_MS))
     const signal = options.signal === undefined ? timer : AbortSignal.any([options.signal, timer])
     let response: Response
     try {
-      response = await this.fetchFn(this.endpoint, {
+      response = await this.fetchFn(connection.endpoint, {
         method: 'POST',
         headers: {
           'authorization': `Bearer ${key}`,
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          model: this.model,
+          model: connection.model,
           state: { ping: 'connection-test' },
           questions: {
             ping: {
@@ -305,43 +354,52 @@ export class JevClient {
       return { ok: false, latencyMs, error: timer.aborted || (error instanceof Error && error.name === 'AbortError') ? 'timeout' : 'network' }
     }
     const latencyMs = this.now() - started
+    if (active !== this.active) return { ok: false, latencyMs, error: 'connection-changed' }
     if (response.status === 401 || response.status === 403) return { ok: false, latencyMs, error: 'auth' }
     if (response.status === 404) return { ok: false, latencyMs, error: 'not-found' }
-    // 429 说明认证已通过（key 有效），只是限流——按成功上报，附注原因。
+    // Keep the reachability result and report throttling separately from a parsed answer.
     if (response.status === 429) return { ok: true, latencyMs, error: 'rate-limited' }
     if (response.status >= 500) return { ok: false, latencyMs, error: 'server' }
     if (!response.ok) return { ok: false, latencyMs, error: `http-${String(response.status)}` }
     try {
       const body: unknown = await response.json()
       if (typeof body !== 'object' || body === null) return { ok: false, latencyMs, error: 'invalid-response' }
-      parseAnswers((body as Record<string, unknown>)['answers'])
+      const answers = parseAnswers((body as Record<string, unknown>)['answers'])
+      if (active !== this.active) return { ok: false, latencyMs: this.now() - started, error: 'connection-changed' }
+      if (answers['ping']?.type !== 'noul') return { ok: false, latencyMs, error: 'invalid-response' }
       const model = (body as Record<string, unknown>)['model']
-      return { ok: true, latencyMs, model: typeof model === 'string' ? model : this.model }
+      const reportedModel = typeof model === 'string' && model.trim() ? model : undefined
+      if (reportedModel !== undefined && options.apiKeyOverride === undefined && active.reportedModel !== reportedModel) {
+        active.cache.clear()
+        active.reportedModel = reportedModel
+      }
+      return { ok: true, latencyMs: this.now() - started, model: reportedModel ?? connection.model }
     } catch {
       return { ok: false, latencyMs, error: 'invalid-response' }
     }
   }
 
   /** One or two HTTP attempts inside the wall-clock budget. */
-  private async request(call: ClassifyCall, key: string, started: number): Promise<RequestOutcome> {
+  private async request(call: ClassifyCall, key: string, started: number, active: ActiveConnection): Promise<RequestOutcome> {
+    const { connection } = active
     let attempt = 0
     // At most two attempts; the second only for retryable statuses with budget left.
     for (;;) {
       attempt += 1
-      const budget = this.timeoutMs - (this.now() - started)
+      const budget = connection.timeoutMs - (this.now() - started)
       if (budget <= 0) return call.signal?.aborted ? 'caller-aborted' : 'timeout'
       const timer = AbortSignal.timeout(budget)
       const signal = call.signal === undefined ? timer : AbortSignal.any([call.signal, timer])
       let response: Response
       try {
-        response = await this.fetchFn(this.endpoint, {
+        response = await this.fetchFn(connection.endpoint, {
           method: 'POST',
           headers: {
             'authorization': `Bearer ${key}`,
             'content-type': 'application/json',
           },
           body: JSON.stringify({
-            model: this.model,
+            model: connection.model,
             state: call.state,
             questions: call.questions,
           }),
@@ -353,8 +411,9 @@ export class JevClient {
         return 'http-error'
       }
       if (response.status === 429 || response.status === 529 || response.status >= 500) {
-        if (attempt < 2 && this.timeoutMs - (this.now() - started) > 400) {
+        if (attempt < 2 && active === this.active && connection.timeoutMs - (this.now() - started) > 400) {
           await sleep(400, call.signal)
+          if (active !== this.active) return 'retryable'
           continue
         }
         return 'retryable'
@@ -365,14 +424,23 @@ export class JevClient {
         if (typeof body !== 'object' || body === null) return 'invalid-response'
         const record = body as Record<string, unknown>
         const answers = parseAnswers(record['answers'])
+        for (const [id, question] of Object.entries(call.questions)) {
+          const answer = Object.hasOwn(answers, id) ? answers[id] : undefined
+          if (answer?.type !== question.type) return 'invalid-response'
+          if (question.type === 'choice' && answer.type === 'choice' && !Object.hasOwn(question.criteria, answer.choice)) {
+            return 'invalid-response'
+          }
+        }
         const usage = typeof record['usage'] === 'object' && record['usage'] !== null
           ? record['usage'] as Record<string, unknown>
           : {}
         const inputTokens = typeof usage['input_tokens'] === 'number' ? usage['input_tokens'] : undefined
         const reportedCost = typeof usage['cost'] === 'number' ? usage['cost'] : undefined
+        const reportedModel = typeof record['model'] === 'string' && record['model'].trim() ? record['model'] : undefined
         return {
           answers,
-          model: typeof record['model'] === 'string' ? record['model'] : this.model,
+          model: reportedModel ?? connection.model,
+          modelReported: reportedModel !== undefined,
           inputTokens,
           costUsd: reportedCost ?? estimateCostUsd(inputTokens),
         }
@@ -387,8 +455,8 @@ export class JevClient {
   }
 
   /** Count one provider failure and warn exactly when the gate opens. */
-  private countFailure(kind: string): void {
-    if (this.gate.onFailure()) {
+  private countFailure(gate: CooldownGate, kind: string): void {
+    if (gate.onFailure()) {
       this.logger.warn(
         `dsh-jev-interceptor: provider failing (${kind}); entering cooldown for ${this.cooldownMs}ms — decisions degrade to stock behavior`,
       )

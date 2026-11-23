@@ -61,8 +61,27 @@ From Jev's published limits (verified against docs.typesafe.ai, 2026-09):
 
 The client speaks the plain `state + questions` wire shape, which is identical across:
 
-- **TypeSafe direct** — `POST https://api.typesafe.ai/v1/systemone`, model `jev-latest` (or a pinned `jev-1.13.x`).
-- **OpenRouter** — `POST https://openrouter.ai/api/alpha/decisions`, model `~typesafe/jev-latest` (alpha endpoint; not listed in the public model catalog; chat/completions refuses decisions models).
-- **Laya** (Apache-2.0, local) — same question/answer shape, ~33ms on a T4; weaker zero-shot and shorter context, needs domain fine-tuning. A natural future provider behind the same interface.
+- **TypeSafe direct** uses `POST /v1/systemone` and `jev-1.14.0`, with `TYPESAFE_API_KEY` as the default credential reference. [TypeSafe models](https://docs.typesafe.ai/models)
+- **OpenRouter** uses `POST /api/v1/systemone` and `typesafe/jev-1.14-20261014`, with `OPENROUTER_API_KEY` as the default credential reference. An explicitly configured legacy alpha endpoint still gets the legacy default model. [API reference](https://openrouter.ai/docs/api/api-reference/systemone/submit-a-system-one-request) · [Jev 1.14](https://openrouter.ai/typesafe/jev-1.14)
+- **Local candidates** include Laya via llama.cpp. Verify the response schema, bilingual behavior, latency, and thresholds before adopting it for a task. [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#post-v1systemone-typesafe-compatible-system-one-api) · [Laya model card](https://huggingface.co/convaiinnovations/laya-typed-decisions)
 
 Set `provider`/`endpoint`/`model` accordingly; see the README for examples.
+
+## November 2026 ecosystem and validation priorities
+
+As of November 23, TypeSafe lists Jev 1.14, released October 14, as its latest release. TypeSafe expects the largest improvement in multilingual performance. Images, `box`, and longer context are candidates for independent prototypes. This plugin's development baseline is DSH 0.2.2-rc.3. Check new hooks on 0.2.2-rc.5 and 0.2.3-alpha.2 separately. [TypeSafe changelog](https://docs.typesafe.ai/changelog) · [Jev 1.14 announcement](https://typesafe.ai/blog/jev-1-14) · [DSH rc.5](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.5) · [DSH alpha.2](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.3-alpha.2)
+
+| Project | Pattern to adopt |
+|---|---|
+| [Jevcore](https://github.com/PerryLink/jevcore) | Offline mock by default, documented data flow, and a shared decision core for DSH, MCP, and Node. The earlier [dsh-jev](https://github.com/buberlo/dsh-jev) points users to Jevcore. |
+| [OpenCode Decision Models](https://github.com/third774/opencode-decision-models#tools) | Inspect available models and their capabilities, then run bounded batches over a fixed evaluation set. |
+| [OpenCode/Cursor Jev Router](https://github.com/drmaas/jev-router) and [Claude Code Jev Router](https://github.com/gargpratyush/jev-router) | Use a small list of real candidates and allow the router to defer. Measure the overhead of asking every turn. |
+| [Perplexity Decider v1.3](https://www.perplexity.ai/en-GB/hub/blog/perplexity-decider), [Clef](https://blog.cloudflare.com/clef-faster-cheaper-multimodal/), and [Laya](https://huggingface.co/convaiinnovations/laya-typed-decisions) | Use these models as comparators for bilingual classification, session reranking, and latency. Recheck thresholds on the actual task for each model. |
+
+The panel, ping, decision client, and `/jev-status` share the effective connection. Changing it resets the old connection's cache and cooldown while keeping cumulative daily spend. The panel shows whether an edit was saved to the active DSH profile.
+
+Calibration now replays decision and agreement records that match the model ID reported by the provider. The official pinned versions can show their existing samples before a connection test. Unversioned or rolling-alias records remain visible in the log. Use the panel or `/jev-calibrate --model <id>` to replay historical versions. Applying panel advice checks that the model and the original threshold still match the report.
+
+1. **Add bilingual holdout evaluation.** Attach question version, tool type, and language to the model-scoped replay. Split tuning and holdout by session or time. Measure false blocks, unnecessary asks, coverage, degradation, end-to-end p50/p95, and cost. Use paired Chinese and English tasks to compare short rules with rules that include positive and negative examples. Explicit examples lowered interruption rates on a synthetic policy dataset, which motivates a separate test on this plugin's own traffic. [Policy gate study](https://arxiv.org/abs/2611.02155) · [Paired evaluation](https://arxiv.org/abs/2610.02267)
+2. **Prototype read-only semantic improvements.** Start with reranking within a retrieval page or pointing out missing evidence in a Ralph report. Compare relevance, time to find evidence, and added latency, preserving the original result when evidence is weak.
+3. **Log model recommendations in shadow first.** Compare a fixed route, a simple rule, and Jev on first-turn choices. Track task outcomes, total billed cost, latency, and cache hits. The paired evaluation found chance-level zero-shot routing, and MultiTurnRoute treats prefix reuse as part of routing cost. [Paired evaluation](https://arxiv.org/abs/2610.02267) · [MultiTurnRoute](https://arxiv.org/abs/2611.10848)

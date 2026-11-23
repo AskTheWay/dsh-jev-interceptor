@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jev 决策 · 界面预览</title>
+    <style>
+      :root {
+        --dsw-alias-bg-base: #f6f8fa;
+        --dsw-alias-bg-layer-1: #fff;
+        --dsw-alias-bg-layer-2: #f0f3f6;
+        --dsw-alias-label-primary: #233044;
+        --dsw-alias-label-secondary: #637185;
+        --dsw-alias-border-l1: #e1e6ed;
+        color-scheme: light;
+      }
+      :root[data-theme='dark'] {
+        --dsw-alias-bg-base: #15181e;
+        --dsw-alias-bg-layer-1: #1e222a;
+        --dsw-alias-bg-layer-2: #262b34;
+        --dsw-alias-label-primary: #e2e7ef;
+        --dsw-alias-label-secondary: #a0abba;
+        --dsw-alias-border-l1: #333a46;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body,
+      #preview-root {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        background: var(--dsw-alias-bg-layer-2);
+        color: var(--dsw-alias-label-primary);
+      }
+      .preview-shell {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      .preview-controls {
+        flex: none;
+        min-height: 42px;
+        padding: 8px 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        background: var(--dsw-alias-bg-layer-1);
+        border-bottom: 1px solid var(--dsw-alias-border-l1);
+        font-size: 11px;
+      }
+      .preview-controls b {
+        font-size: 11px;
+      }
+      .preview-controls label {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+      }
+      .preview-controls select {
+        border: 1px solid var(--dsw-alias-border-l1);
+        border-radius: 4px;
+        padding: 3px;
+        background: var(--dsw-alias-bg-base);
+        color: inherit;
+        font: inherit;
+      }
+      .preview-canvas {
+        min-height: 0;
+        flex: 1;
+        margin: 0 auto;
+        width: 100%;
+        border-inline: 1px solid var(--dsw-alias-border-l1);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="preview-root"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

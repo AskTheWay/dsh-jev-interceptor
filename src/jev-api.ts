@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { THRESHOLD_KEYS, type CalibrationReport, type ShadowReadiness } from './calibrate.js'
 import type { ImpactSummary } from './impact.js'
 import type { PingResult } from './jev.js'
+import type { KeySource } from './provider.js'
 import { clampLogLimit, LOG_PANEL_N, type TelemetryEntry } from './telemetry.js'
 
 const BASE = '/api/jev-interceptor'
@@ -18,18 +19,26 @@ export interface JevPanelStatus {
   mode: 'shadow' | 'enforce'
   provider: string
   model: string
+  activeModel: string | null
+  endpointOrigin: string | null
+  connectionError?: string
+  keyReference: string
+  keyError?: string
   keyConfigured: boolean
-  keySource: 'config' | 'credentials' | 'env' | 'none'
+  keySource: KeySource
   /** 设置服务落盘路径；null = 不落盘（保存只在本运行生效）。 */
   persistPath: string | null
   /** 当日已花（USD，进程内记账）；限额见 dailyCostLimitUsd。 */
   costTodayUsd: number
   /** 每日成本限额（USD）；0 = 不限。 */
   dailyCostLimitUsd: number
+  preapproveAllowlist: string[]
   guardEnabled: boolean
   preapproveEnabled: boolean
   stagnationEnabled: boolean
 }
+
+export type ConfigUpdateResult = { persisted: boolean } | { error: string }
 
 export interface JevPanelTagSummary {
   tag: string
@@ -47,22 +56,22 @@ export interface JevPanelTagSummary {
 export function registerJevApi(
   ctx: Context,
   deps: {
-    getStatus: () => JevPanelStatus
+    getStatus: () => Promise<JevPanelStatus>
     getStats: () => Promise<JevPanelTagSummary[]>
-    /** 校准报告（面板只读展示；纯读，无状态写入）。 */
-    getCalibration: () => Promise<CalibrationReport>
+    /** 查询指定模型的校准报告；当前模型会保留报告快照。 */
+    getCalibration: (model?: string) => Promise<CalibrationReport>
     /** 效果归因（净收益/成本/延迟汇总，纯读）。 */
     getImpact: () => Promise<ImpactSummary>
     /**
      * 连接测试（发一次最小真实请求；约一次最小决策的成本）。
      * @param apiKeyOverride - 面板传来的未保存草稿 key；缺省测已配置的 key。
      */
-    testConnection: (apiKeyOverride?: string) => Promise<PingResult>
+    testConnection: (apiKeyOverride?: string, signal?: AbortSignal) => Promise<PingResult>
     /** 决策明细（/log 路由用；detail 只含枚举与数值 token，无敏感数据）。 */
     getLog: (limit: number) => Promise<TelemetryEntry[]>
     /** 影子→执行的就绪度评估（面板 hero 的升级提示灯）。 */
     getReadiness: () => Promise<ShadowReadiness>
-    updateConfig: (patch: Record<string, unknown>) => Promise<{ rejected: string[] }>
+    updateConfig: (patch: Record<string, unknown>) => Promise<ConfigUpdateResult>
   },
 ): void {
   const connection = ctx.get('connection')
@@ -78,7 +87,7 @@ export function registerJevApi(
     path: `${BASE}/status`,
     methods: ['GET'],
     requestBody: 'buffered',
-    fetch: async () => json(deps.getStatus()),
+    fetch: async () => json(await deps.getStatus()),
   })
 
   connection.fetch.register({
@@ -92,7 +101,7 @@ export function registerJevApi(
     path: `${BASE}/calibration`,
     methods: ['GET'],
     requestBody: 'buffered',
-    fetch: async () => json(await deps.getCalibration()),
+    fetch: async (request: Request) => json(await deps.getCalibration(new URL(request.url).searchParams.get('model') ?? undefined)),
   })
 
   connection.fetch.register({
@@ -115,7 +124,7 @@ export function registerJevApi(
       } catch {
         // 无 body 或非 JSON：测已配置的 key。
       }
-      return json(await deps.testConnection(override))
+      return json(await deps.testConnection(override, request.signal))
     },
   })
 
@@ -140,27 +149,18 @@ export function registerJevApi(
     methods: ['PUT'],
     requestBody: 'buffered',
     fetch: async (request: Request) => {
-      try {
-        const body = JSON.parse(await request.text()) as Record<string, unknown>
-        // Whitelist: toggles/credentials plus the eight calibratable thresholds
-        // (calibration's one-click apply); threshold values re-validated host-side
-        // and rejected honestly (400) when out of range.
-        const allowed = ['enabled', 'mode', 'apiKey', 'provider', 'endpoint', 'preapproveToolAllowlist', ...THRESHOLD_KEYS]
-        const patch: Record<string, unknown> = {}
-        for (const key of allowed) {
-          if (Object.hasOwn(body, key)) patch[key] = body[key]
-        }
-        if (Object.keys(patch).length === 0) {
-          return json({ error: 'no updatable fields' }, 400)
-        }
-        const { rejected } = await deps.updateConfig(patch)
-        if (rejected.length > 0) {
-          return json({ error: `非法值（需 0-1）: ${rejected.join(', ')}` }, 400)
-        }
-        return json({ ok: true })
-      } catch (error: unknown) {
-        return json({ error: error instanceof Error ? error.message : String(error) }, 500)
+      let body: unknown
+      try { body = JSON.parse(await request.text()) } catch {
+        return json({ error: '请求必须为 JSON 对象。' }, 400)
       }
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        return json({ error: '请求必须为 JSON 对象。' }, 400)
+      }
+      const allowed = ['enabled', 'mode', 'apiKey', 'apiKeyEnv', 'provider', 'endpoint', 'model', 'preapproveToolAllowlist', 'calibrationModel', 'calibrationCurrent', ...THRESHOLD_KEYS]
+      const patch = Object.fromEntries(Object.entries(body).filter(([key]) => allowed.includes(key)))
+      if (Object.keys(patch).length === 0) return json({ error: '没有可更新的字段。' }, 400)
+      const result = await deps.updateConfig(patch)
+      return 'error' in result ? json(result, 400) : json({ ok: true, ...result })
     },
   })
 

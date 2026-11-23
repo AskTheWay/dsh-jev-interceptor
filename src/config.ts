@@ -8,6 +8,8 @@
 import z from '@deepseek-ai/schemastery'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
+export type JevProvider = 'typesafe' | 'openrouter' | 'custom'
+
 /**
  * Complete plugin configuration, validated by the same-named schema.
  *
@@ -22,12 +24,12 @@ export interface Config {
   /** `shadow` (default) records would-be decisions only; `enforce` acts on them. */
   mode?: 'shadow' | 'enforce'
   /** Which Jev entry point to call: typesafe (官方) / openrouter / custom. */
-  provider?: 'typesafe' | 'openrouter' | 'custom'
+  provider?: JevProvider
   /** 自定义 endpoint URL（provider 为 custom 时必填）. */
   endpoint?: string
   /** 模型 ID（默认跟随 provider）. */
   model?: string
-  /** 环境变量名（引用式 key，默认 TYPESAFE_API_KEY）. */
+  /** Credential reference (default follows the provider). */
   apiKeyEnv?: string
   /** API key 值（/jev-key 写入；优先于环境变量）. */
   apiKey?: string
@@ -139,6 +141,7 @@ export const DEFAULTS = {
   mode: 'shadow' as const,
   provider: 'typesafe' as const,
   apiKeyEnv: 'TYPESAFE_API_KEY',
+  openrouterApiKeyEnv: 'OPENROUTER_API_KEY',
   timeoutMs: 1500,
   /** OpenRouter 的 decisions 端点实测 2-3s（本机 p95 ~3s），显式配置可覆盖。 */
   openrouterTimeoutMs: 3000,
@@ -177,15 +180,15 @@ export const DEFAULTS = {
   stagnationArgsPreviewChars: 160,
 } as const
 
-export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(DEFAULTS.enabled),
-  mode: z.union(['shadow', 'enforce']).default(DEFAULTS.mode),
-  provider: z.union(['typesafe', 'openrouter', 'custom']).default(DEFAULTS.provider),
-  endpoint: z.string(),
-  model: z.string(),
-  apiKeyEnv: z.string().role('credential-ref').default(DEFAULTS.apiKeyEnv),
-  apiKey: z.string().role('secret').description('API key 值（优先于环境变量）'),
-  timeoutMs: z.number().step(1).min(100).default(DEFAULTS.timeoutMs),
+export const Config = z.object({
+  enabled: z.boolean().default(DEFAULTS.enabled).volatile(),
+  mode: z.union(['shadow', 'enforce']).default(DEFAULTS.mode).volatile(),
+  provider: z.union(['typesafe', 'openrouter', 'custom']).default(DEFAULTS.provider).volatile(),
+  endpoint: z.string().volatile(),
+  model: z.string().volatile(),
+  apiKeyEnv: z.string().role('credential-ref').volatile(),
+  apiKey: z.string().role('secret').description('API key 值（优先于环境变量）').volatile(),
+  timeoutMs: z.number().step(1).min(100),
   cooldownMs: z.number().step(1).min(1000).default(DEFAULTS.cooldownMs),
   failureThreshold: z.number().step(1).min(1).default(DEFAULTS.failureThreshold),
   maxConcurrency: z.number().step(1).min(1).max(8).default(DEFAULTS.maxConcurrency),
@@ -201,20 +204,20 @@ export const Config: z<Config> = z.object({
   guardEnabled: z.boolean().default(DEFAULTS.guardEnabled),
   guardReadOnlyTools: z.array(z.string()).default([...DEFAULTS.guardReadOnlyTools]),
   guardExcludeTools: z.array(z.string()).default(DEFAULTS.guardExcludeTools),
-  guardConfidenceMin: z.number().min(0).max(1).default(DEFAULTS.guardConfidenceMin),
-  guardDenyConfidence: z.number().min(0).max(1).default(DEFAULTS.guardDenyConfidence),
-  guardIrreversibleCeiling: z.number().min(0).max(1).default(DEFAULTS.guardIrreversibleCeiling),
-  guardIrreversibleDenyFloor: z.number().min(0).max(1).default(DEFAULTS.guardIrreversibleDenyFloor),
-  guardInjectionAskThreshold: z.number().min(0).max(1).default(DEFAULTS.guardInjectionAskThreshold),
-  guardUserRequestedMin: z.number().min(0).max(1).default(DEFAULTS.guardUserRequestedMin),
-  guardFromUntrustedMin: z.number().min(0).max(1).default(DEFAULTS.guardFromUntrustedMin),
+  guardConfidenceMin: z.number().min(0).max(1).default(DEFAULTS.guardConfidenceMin).volatile(),
+  guardDenyConfidence: z.number().min(0).max(1).default(DEFAULTS.guardDenyConfidence).volatile(),
+  guardIrreversibleCeiling: z.number().min(0).max(1).default(DEFAULTS.guardIrreversibleCeiling).volatile(),
+  guardIrreversibleDenyFloor: z.number().min(0).max(1).default(DEFAULTS.guardIrreversibleDenyFloor).volatile(),
+  guardInjectionAskThreshold: z.number().min(0).max(1).default(DEFAULTS.guardInjectionAskThreshold).volatile(),
+  guardUserRequestedMin: z.number().min(0).max(1).default(DEFAULTS.guardUserRequestedMin).volatile(),
+  guardFromUntrustedMin: z.number().min(0).max(1).default(DEFAULTS.guardFromUntrustedMin).volatile(),
   untrustedScanEnabled: z.boolean().default(DEFAULTS.untrustedScanEnabled),
 
   preapproveEnabled: z.boolean().default(DEFAULTS.preapproveEnabled),
-  preapproveToolAllowlist: z.array(z.string()).default(DEFAULTS.preapproveToolAllowlist),
-  preapproveAutoApproveMin: z.number().min(0).max(1).default(DEFAULTS.preapproveAutoApproveMin),
-  preapproveIrreversibleMax: z.number().min(0).max(1).default(DEFAULTS.preapproveIrreversibleMax),
-  preapproveInjectionSuspectMax: z.number().min(0).max(1).default(DEFAULTS.preapproveInjectionSuspectMax),
+  preapproveToolAllowlist: z.array(z.string()).default(DEFAULTS.preapproveToolAllowlist).volatile(),
+  preapproveAutoApproveMin: z.number().min(0).max(1).default(DEFAULTS.preapproveAutoApproveMin).volatile(),
+  preapproveIrreversibleMax: z.number().min(0).max(1).default(DEFAULTS.preapproveIrreversibleMax).volatile(),
+  preapproveInjectionSuspectMax: z.number().min(0).max(1).default(DEFAULTS.preapproveInjectionSuspectMax).volatile(),
 
   imageOffloadEnabled: z.boolean().default(false),
   imageOffloadPressureThreshold: z.number().min(0).max(1).default(0.75),
@@ -277,7 +280,8 @@ export interface ResolvedSettings {
  * @param config - raw plugin config (YAML-validated or programmatic).
  * @returns settings with every field populated.
  */
-export function resolveSettings(config: Config): ResolvedSettings {
+export function resolveSettings(input: Config | ProfileConfig): ResolvedSettings {
+  const config = readProfileConfig(input)
   return {
     mode: config.mode ?? DEFAULTS.mode,
     // timeoutMs 未显式配置时跟随 provider：TypeSafe 直连 ~1s 内，OpenRouter 代理 ~3s。
@@ -321,15 +325,16 @@ export function resolveSettings(config: Config): ResolvedSettings {
     stagnationConfidenceMin: config.stagnationConfidenceMin ?? DEFAULTS.stagnationConfidenceMin,
     stagnationCooldownMs: config.stagnationCooldownMs ?? DEFAULTS.stagnationCooldownMs,
     stagnationArgsPreviewChars: config.stagnationArgsPreviewChars ?? DEFAULTS.stagnationArgsPreviewChars,
-    apiKeyEnv: config.apiKeyEnv ?? DEFAULTS.apiKeyEnv,
+    apiKeyEnv: resolveCredentialName(config),
   }
 }
 
 /** TypeSafe's public decisions endpoint. */
 export const TYPESAFE_ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 
-/** OpenRouter's alpha decisions endpoint (model ids carry a `~` prefix there). */
-export const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/alpha/decisions'
+/** OpenRouter's public TypeSafe-compatible endpoint. */
+export const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/systemone'
+const OPENROUTER_LEGACY_ENDPOINT = 'https://openrouter.ai/api/alpha/decisions'
 
 /**
  * Default model id for the TypeSafe provider preset.
@@ -339,13 +344,14 @@ export const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/alpha/decisions'
  */
 export const TYPESAFE_MODEL = 'jev-1.14.0'
 
-/**
- * OpenRouter preset model. The platform rejects versioned ids (only
- *  resolves); pin-drift protection comes from recording
- * the provider-reported version (response.model) into telemetry on every call
- * — drift is visible in /jev-log, not silent.
- */
-export const OPENROUTER_MODEL = '~typesafe/jev-latest'
+/** The dated OpenRouter catalog ID for the same Jev 1.14 release. */
+export const OPENROUTER_MODEL = 'typesafe/jev-1.14-20261014'
+
+type ConnectionConfig = Pick<Config, 'provider' | 'model' | 'endpoint' | 'apiKeyEnv'>
+
+export function resolveCredentialName(config: ConnectionConfig): string {
+  return config.apiKeyEnv?.trim() || (config.provider === 'openrouter' ? DEFAULTS.openrouterApiKeyEnv : DEFAULTS.apiKeyEnv)
+}
 
 /**
  * Resolve the effective endpoint and model for the configured provider.
@@ -353,23 +359,40 @@ export const OPENROUTER_MODEL = '~typesafe/jev-latest'
  * @returns the endpoint URL and model id.
  * @throws when `custom` is selected without an explicit endpoint and model.
  */
-export function resolveEndpoint(config: Config): { endpoint: string; model: string } {
-  if (config.provider === 'custom') {
-    if (config.endpoint === undefined || config.endpoint.length === 0) {
-      throw new Error('dsh-jev-interceptor: provider "custom" requires endpoint')
-    }
-    if (config.model === undefined || config.model.length === 0) {
-      throw new Error('dsh-jev-interceptor: provider "custom" requires model')
-    }
-    return { endpoint: config.endpoint, model: config.model }
+export function resolveEndpoint(input: ConnectionConfig | ProfileConfig): { endpoint: string; model: string } {
+  const config = readProfileConfig(input)
+  const provider = config.provider ?? DEFAULTS.provider
+  const endpoint = config.endpoint?.trim() || (provider === 'custom' ? '' : provider === 'openrouter' ? OPENROUTER_ENDPOINT : TYPESAFE_ENDPOINT)
+  const routerModel = endpoint.replace(/\/$/, '') === OPENROUTER_LEGACY_ENDPOINT ? '~typesafe/jev-latest' : OPENROUTER_MODEL
+  const model = config.model?.trim() || (provider === 'custom' ? '' : provider === 'openrouter' ? routerModel : TYPESAFE_MODEL)
+  if (!endpoint || !model) throw new Error('自定义连接需要填写完整端点和模型 ID。')
+
+  let url: URL
+  try { url = new URL(endpoint) } catch { throw new Error('端点必须是完整的 HTTP 或 HTTPS 地址。') }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) {
+    throw new Error('端点必须是完整的 HTTP 或 HTTPS 地址，且不能内嵌凭据。')
   }
-  const preset = config.provider === 'openrouter'
-    ? { endpoint: OPENROUTER_ENDPOINT, model: OPENROUTER_MODEL }
-    : { endpoint: TYPESAFE_ENDPOINT, model: TYPESAFE_MODEL }
-  return {
-    endpoint: config.endpoint ?? preset.endpoint,
-    model: config.model ?? preset.model,
+  return { endpoint, model }
+}
+
+type ProfileConfig = ReturnType<typeof Config>
+
+/** The host keeps stable references for live fields. Other callers may pass plain values. */
+export function readProfileConfig(config: Config | ProfileConfig): Config {
+  if (!hasLiveConfig(config)) return config as Config
+  return Object.fromEntries(Object.entries(config).map(([key, value]) => [key, readLiveValue(value)])) as Config
+}
+
+export function hasLiveConfig(config: { readonly provider?: unknown }): boolean {
+  const provider = config.provider
+  return provider !== null && typeof provider === 'object' && 'get' in provider && typeof provider.get === 'function'
+}
+
+function readLiveValue(value: unknown): unknown {
+  if (value !== null && typeof value === 'object' && 'get' in value && typeof value.get === 'function') {
+    return value.get()
   }
+  return value
 }
 
 /** Profile entry id of the jev-interceptor row: the settings-forms update target. */

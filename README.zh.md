@@ -74,7 +74,8 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 /jev-stats              # 看它怎么判，含完整概率分布
 /jev-log 20 --json      # 最近 N 条决策明细；--json/--csv 导出原始数据
 /jev-impact             # 底线数字：省掉的点击、拦截、成本与延迟
-/jev-calibrate          # 影子数据阈值建议（面板一键应用）
+/jev-calibrate          # 当前模型的阈值建议（在面板逐项采纳）
+/jev-calibrate --model jev-1.13.0  # 查看旧版模型的回放
 /jev-allowlist          # 预批准名单：查看影子推荐、加/删工具
 /jev-mode enforce       # 数字满意后升级
 /jev-off                # 回到原生行为
@@ -99,7 +100,7 @@ dsh plugin --profile <name> add dsh-jev-interceptor
 - 决策总成本 **$0.0090**（180 次计费判断共 214,323 input tokens）
 - 129 次判断降级回原生行为，**行为零差异**——fail-closed 说到做到
 
-校准自带闭环：每次 `/jev-calibrate` 都会留一份报告快照；下次运行会告诉你上次哪些建议被采纳（`✓`）、未采纳（`·`）、被手动改写（`↔`），以及一致率桶怎么变。
+校准默认使用当前模型的样本，并为同版本的报告保留快照。下次生成报告时，可查看上次建议的采纳情况和一致率变化。历史模型的回放可在「校准」页或通过 `/jev-calibrate --model <id>` 查看。未标明模型版本的记录仍可在日志中查看。
 
 ## 安全模型（真正值得细读的部分）
 
@@ -144,14 +145,14 @@ dsh plugin --profile <name> add dsh-jev-interceptor
     apiKeyEnv: OPENROUTER_API_KEY
 ```
 
-OpenRouter 今天就能用、无需候补（decisions 模型在那里走专用端点）：
+OpenRouter 预设通过 [System One 接口](https://openrouter.ai/docs/api/api-reference/systemone/submit-a-system-one-request) 调用 Jev 1.14，默认从 `OPENROUTER_API_KEY` 解析凭据。TypeSafe 直连默认使用 `TYPESAFE_API_KEY`。已有配置可通过 `endpoint`、`model` 或 `apiKeyEnv` 显式定制。
 
 ```yaml
     provider: openrouter
     apiKeyEnv: OPENROUTER_API_KEY
 ```
 
-客户端直说 `state + questions` 线协议，TypeSafe 直连、OpenRouter 与 Apache-2.0 本地平替 [Laya](https://huggingface.co/convaiinnovations/laya) 完全同构——provider 可随时切换，闭源供应商永远成不了锁定。
+在 Jev 面板的「设置」选择服务，保存连接，再点「测试连接」。切换服务或地址后，插件会使用新连接的凭据引用。面板保存的旧 Key 会清除，可在新连接下输入对应的 Key。自定义服务需要填写完整的 HTTP(S) 端点、模型 ID 和凭据引用。会话引用模块在 `jev-session-reference` 行单独配置。
 
 ## 开发
 
@@ -164,6 +165,8 @@ node scripts/smoke.mjs           # 对真实 provider 跑一次决策
 ```
 
 ## 路线图
+
+[System-1 生态调研与验证顺序](docs/jev-usage-points.zh.md#2026-11-生态调研与验证顺序) 汇总了近期插件、可对照模型和适合本项目先验证的功能。
 
 审批闭环（v0.1）、语义会话保留（v0.2）、图像卸载预规划（v0.4）、停滞检测（v0.5）已落地。已核实的下一战场——让"选择"而不只是"安全"用上 System-1（[完整目录](docs/jev-usage-points.zh.md)）：
 
