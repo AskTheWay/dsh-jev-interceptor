@@ -54,6 +54,7 @@ describe('Telemetry.stats', () => {
       { ...base, tag: 'approval-loop' as const, action: 'agreement' as const, detail: 'jev=human human=allowed-once friction-human-approved' },
       { ...base, tag: 'approval-loop' as const, action: 'agreement' as const, detail: 'jev=auto-approve human=allowed-once aligned-approve' },
     ])
+    expect(text).toContain('agreement: would-over-approve=2 friction-human-approved=1 aligned-approve=1')
     expect(text).toContain('误批风险')
     expect(text).toContain('多余人工')
     expect(text).toContain('一致批')
@@ -111,3 +112,4 @@ describe('Telemetry.recentEntries', () => {
     await rm(dir, { recursive: true, force: true })
   })
 })
+
